@@ -168,6 +168,6 @@ Every setting is an environment variable with a sane default — see `backend/.e
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `800` / `150` | Document chunking |
 | `MAX_UPLOAD_SIZE_MB` | `25` | PDF upload ceiling |
 | `STREAM_SAMPLING_INTERVAL_SECONDS` | `2.0` | One frame every N seconds |
-| `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated |
+| `CORS_ORIGINS` | `localhost:3000, localhost:8080` | Comma-separated |
 
 Local data (`backend/data/`) — SQLite databases, the Chroma index, and uploads — is gitignored and regenerated on first run.
