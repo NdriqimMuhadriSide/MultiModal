@@ -33,6 +33,21 @@ export interface ChatResponse {
   answer: string;
 }
 
+/**
+ * One event from POST /api/v1/chat/stream, mirroring the payloads built by
+ * `_sse()` in backend/app/api/v1/endpoints/chat.py.
+ *
+ * A stream is always `start`, then any number of `delta`s, then exactly one
+ * terminator — `done` or `error`, never both. `error` carries a mid-stream
+ * provider failure that could not be an HTTP status code, because the
+ * response was already committed as 200 before the model produced anything.
+ */
+export type ChatStreamEvent =
+  | { type: "start"; conversation_id: string }
+  | { type: "delta"; content: string }
+  | { type: "done" }
+  | { type: "error"; detail: string };
+
 /** A single stored message as returned by GET /api/v1/chat/{id}/history */
 export interface ConversationMessageResponse {
   role: MessageRole;
@@ -116,6 +131,15 @@ export interface Message {
   createdAt: string;
   status?:
     | "sending"
+    /**
+     * Tokens are arriving and `content` is growing. Distinct from "sending"
+     * because the bubble already has text to render — see MessageBubble's
+     * `isPending`, which shows the typing indicator only while the content
+     * is still empty. It *is* an in-flight status in store/chat-store.ts:
+     * a reload mid-stream kills the fetch, so the partial answer has to
+     * settle to an error rather than sit there looking live forever.
+     */
+    | "streaming"
     | "searching"
     | "generating"
     | "transcribing"

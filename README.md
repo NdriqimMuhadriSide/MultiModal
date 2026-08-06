@@ -92,6 +92,7 @@ All routes are under `/api/v1`.
 | --- | --- | --- |
 | `GET` | `/health` | Liveness — deliberately never cached |
 | `POST` | `/chat` | Chat with conversation memory |
+| `POST` | `/chat/stream` | Same, streamed token by token over SSE |
 | `GET` | `/chat/{conversation_id}/history` | Full stored history for a conversation |
 | `POST` | `/agent/ask` | LangGraph agent — routes to a tool, then answers |
 | `POST` | `/documents/upload` | Upload a PDF |

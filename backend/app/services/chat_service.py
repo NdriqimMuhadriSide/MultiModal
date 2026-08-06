@@ -12,6 +12,7 @@ Every call is scoped to a conversation_id, so multiple independent
 conversations don't bleed into each other's history. If no conversation_id
 is given, a new one is generated - see get_or_create_conversation_id.
 """
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from fastapi import HTTPException, status
@@ -63,6 +64,60 @@ class ChatService:
         self._memory.add_message(resolved_id, role="assistant", content=answer)
 
         return ChatResult(conversation_id=resolved_id, answer=answer)
+
+    def stream_answer(
+        self, message: str, conversation_id: str | None = None
+    ) -> tuple[str, Iterator[str]]:
+        """
+        The streaming counterpart to `get_answer`: same memory flow, but the
+        answer is yielded in pieces as the model produces it.
+
+        Returns `(conversation_id, chunks)` rather than just the generator,
+        because the caller needs the id *before* the first token in order to
+        send it as the opening event - and resolving it lazily inside the
+        generator would mean the client can't associate the stream with a
+        conversation until the model has already started answering.
+
+        Steps 1-3 (load history, store the user message) run eagerly, at call
+        time. Only the LLM call is deferred to iteration.
+
+        Where this genuinely differs from `get_answer`:
+
+          - The assistant's turn is written once the stream finishes, not
+            before, because there is nothing to write until then.
+          - `finally` covers client disconnects. When a browser tab closes
+            mid-answer the generator is closed and GeneratorExit is raised at
+            the yield, so the partial text is still persisted. A user who saw
+            half an answer has that half in their history, and the next turn's
+            context matches what they actually read - the alternative is a
+            conversation whose history silently disagrees with the screen.
+          - Nothing is written when zero chunks arrived (a request that failed
+            before the first token), which would otherwise store an empty
+            assistant turn that `add_message` rejects anyway.
+        """
+        resolved_id = conversation_id or self._memory.new_conversation_id()
+
+        history = self._memory.get_history(resolved_id, limit=self._history_limit)
+        history_messages = [{"role": msg.role, "content": msg.content} for msg in history]
+
+        self._memory.add_message(resolved_id, role="user", content=message)
+
+        def chunks() -> Iterator[str]:
+            collected: list[str] = []
+            try:
+                for delta in self._llm_service.stream_response(
+                    message, history=history_messages
+                ):
+                    collected.append(delta)
+                    yield delta
+            finally:
+                answer = "".join(collected)
+                if answer.strip():
+                    self._memory.add_message(
+                        resolved_id, role="assistant", content=answer
+                    )
+
+        return resolved_id, chunks()
 
 
 def get_chat_service() -> ChatService:

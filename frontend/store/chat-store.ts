@@ -67,6 +67,7 @@ const MAX_PERSISTED_CHATS = 50;
  */
 const IN_FLIGHT_STATUSES: ReadonlySet<Message["status"]> = new Set<Message["status"]>([
   "sending",
+  "streaming",
   "searching",
   "generating",
   "transcribing",
@@ -142,6 +143,14 @@ interface ChatState {
 
   appendMessage: (chatId: string, message: Message) => void;
   updateMessage: (chatId: string, messageId: string, patch: Partial<Message>) => void;
+  /**
+   * Concatenates onto a message's existing content, for answers that arrive
+   * in pieces. Separate from `updateMessage` because a streaming consumer
+   * holds only the newest delta, not the text so far — making it patch
+   * `content` would mean tracking the accumulated string outside the store
+   * and re-sending the whole answer on every token.
+   */
+  appendToMessage: (chatId: string, messageId: string, delta: string) => void;
   setConversationId: (chatId: string, conversationId: string) => void;
 
   /** Drops every chat and starts a fresh one, clearing localStorage too. */
@@ -207,6 +216,22 @@ export const useChatStore = create<ChatState>()(
                     ...chat,
                     messages: chat.messages.map((message) =>
                       message.id === messageId ? { ...message, ...patch } : message
+                    ),
+                  }
+                : chat
+            ),
+          })),
+
+        appendToMessage: (chatId, messageId, delta) =>
+          set((state) => ({
+            chats: state.chats.map((chat) =>
+              chat.id === chatId
+                ? {
+                    ...chat,
+                    messages: chat.messages.map((message) =>
+                      message.id === messageId
+                        ? { ...message, content: message.content + delta }
+                        : message
                     ),
                   }
                 : chat
@@ -316,6 +341,13 @@ export function toStoredMessages(chats: Chat[]): StoredMessage[] {
       // put a blank row in the index that no search can ever match, and it
       // gets rewritten with real content moments later anyway.
       if (!message.content) continue;
+
+      // Skip anything still in flight. Without this, a streaming answer
+      // rewrites its own archive row on every flush — dozens of IndexedDB
+      // writes for one message, all but the last immediately stale. The
+      // message lands here once, when its status settles to "sent" (or
+      // "error", which keeps a partial answer searchable).
+      if (message.status && IN_FLIGHT_STATUSES.has(message.status)) continue;
       rows.push({
         id: message.id,
         chatId: chat.id,

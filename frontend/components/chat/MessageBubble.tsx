@@ -46,8 +46,12 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   // would misrepresent it as work in progress rather than work not yet
   // started. The user needs to know the send is deferred, not slow.
   const isQueued = message.status === "queued";
+  // The `!content` guard is what makes streaming work here without a special
+  // case: a streaming bubble shows the indicator only in the gap before its
+  // first token, then renders text that keeps growing.
   const isPending =
     (message.status === "sending" ||
+      message.status === "streaming" ||
       message.status === "searching" ||
       message.status === "generating" ||
       message.status === "transcribing" ||

@@ -51,9 +51,19 @@ function createMessage(role: Message["role"], content: string, status?: Message[
   };
 }
 
+/**
+ * How often buffered tokens are committed to the store, in milliseconds.
+ *
+ * ~12 updates/second: below the threshold where text stops looking
+ * continuous, and far below the per-token rate that would thrash
+ * localStorage. Lower this and the writes multiply for no visible gain.
+ */
+const FLUSH_INTERVAL_MS = 80;
+
 export function useChat() {
   const activeChat = useChatStore((state) => state.activeChat());
   const appendMessage = useChatStore((state) => state.appendMessage);
+  const appendToMessage = useChatStore((state) => state.appendToMessage);
   const updateMessage = useChatStore((state) => state.updateMessage);
   const setConversationId = useChatStore((state) => state.setConversationId);
 
@@ -75,32 +85,78 @@ export function useChat() {
       appendMessage(chatId, pendingAssistant);
 
       setIsSending(true);
+
+      // Tokens are buffered and flushed on an interval rather than written
+      // straight through. Every store write re-serializes all persisted
+      // chats into localStorage, so writing per token would mean hundreds of
+      // full serializations for a single answer. At this cadence the text
+      // still arrives faster than anyone reads it, and the write count drops
+      // by an order of magnitude.
+      let buffered = "";
+      let receivedAny = false;
+      const flush = () => {
+        if (!buffered) return;
+        appendToMessage(chatId, pendingAssistant.id, buffered);
+        buffered = "";
+      };
+      const timer = setInterval(flush, FLUSH_INTERVAL_MS);
+
       try {
-        const response = await ChatService.sendMessage(
+        let streamError = false;
+
+        for await (const event of ChatService.streamMessage(
           trimmed,
           activeChat.conversationId
-        );
-
-        if (!activeChat.conversationId) {
-          setConversationId(chatId, response.conversation_id);
+        )) {
+          if (event.type === "start") {
+            if (!activeChat.conversationId) {
+              setConversationId(chatId, event.conversation_id);
+            }
+            // Flipped here rather than at send time: until the stream is
+            // actually open there is nothing to show, and "sending" is what
+            // keeps the typing indicator up.
+            updateMessage(chatId, pendingAssistant.id, { status: "streaming" });
+          } else if (event.type === "delta") {
+            buffered += event.content;
+            receivedAny = true;
+          } else if (event.type === "error") {
+            // A provider failure after the response had already committed as
+            // 200. Whatever arrived stays on screen — only the status moves.
+            streamError = true;
+          }
         }
 
-        updateMessage(chatId, pendingAssistant.id, {
-          content: response.answer,
-          status: "sent",
-        });
+        flush();
+        if (streamError) {
+          updateMessage(chatId, pendingAssistant.id, { status: "error" });
+          setError("The assistant's response was cut off. Please try again.");
+        } else {
+          updateMessage(chatId, pendingAssistant.id, { status: "sent" });
+        }
       } catch (err) {
         const message = toUserFacingError(err);
+        // Only replace the bubble's text when nothing ever arrived. Once
+        // the user has read half an answer, blanking it to show an error
+        // destroys what they were reading; the error line below is enough.
         updateMessage(chatId, pendingAssistant.id, {
-          content: message,
+          ...(receivedAny ? {} : { content: message }),
           status: "error",
         });
         setError(message);
       } finally {
+        clearInterval(timer);
+        flush();
         setIsSending(false);
       }
     },
-    [activeChat, isSending, appendMessage, updateMessage, setConversationId]
+    [
+      activeChat,
+      isSending,
+      appendMessage,
+      appendToMessage,
+      updateMessage,
+      setConversationId,
+    ]
   );
 
   return {

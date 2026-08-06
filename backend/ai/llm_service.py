@@ -20,6 +20,7 @@ that sets the assistant's behavior/persona, followed by the user's message.
 This module has no knowledge of FastAPI, HTTP, or business rules. It is a
 thin, reusable wrapper so the rest of the app never imports `openai` directly.
 """
+from collections.abc import Iterator
 from functools import lru_cache
 
 from openai import OpenAI
@@ -60,6 +61,78 @@ class LLMService:
             ValueError: if `user_message` is empty.
             RuntimeError: if the API call fails.
         """
+        try:
+            completion = self._client.chat.completions.create(
+                model=self._model,
+                messages=self._build_messages(user_message, history),
+            )
+        except Exception as exc:  # noqa: BLE001 - surface as a domain error
+            raise RuntimeError(f"LLM request failed: {exc}") from exc
+
+        return completion.choices[0].message.content or ""
+
+    def stream_response(
+        self, user_message: str, history: list[dict[str, str]] | None = None
+    ) -> Iterator[str]:
+        """
+        Same request as `generate_response`, yielded token by token instead
+        of returned whole.
+
+        Kept as a separate method rather than a `stream=True` flag on
+        `generate_response`, because the two have genuinely different return
+        types (`str` vs a generator) and different failure timing. Callers
+        that want the complete text - the agent's router, which asks for a
+        one-word classification, and the non-streaming /chat endpoint the
+        offline outbox replays through - should keep using
+        `generate_response`; there is nothing to gain from streaming a
+        response nobody displays incrementally.
+
+        Failure timing is the subtle part. `generate_response` either raises
+        or returns a complete answer. Here the request is only *started*
+        when the first item is pulled, so a connection error surfaces mid
+        iteration, after the caller has likely already sent HTTP headers.
+        Consumers therefore have to handle a RuntimeError raised partway
+        through, not just at the call site.
+
+        Raises:
+            ValueError: if `user_message` is empty (raised eagerly, before
+                any iteration, since it needs no network call to detect).
+            RuntimeError: if the API call fails - possibly mid-stream.
+        """
+        messages = self._build_messages(user_message, history)
+
+        def iterator() -> Iterator[str]:
+            try:
+                stream = self._client.chat.completions.create(
+                    model=self._model,
+                    messages=messages,
+                    stream=True,
+                )
+                for chunk in stream:
+                    # The final chunk carries finish_reason and an empty
+                    # delta; some providers also send a leading role-only
+                    # chunk. Both have `content` of None, not "".
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta.content
+                    if delta:
+                        yield delta
+            except Exception as exc:  # noqa: BLE001 - surface as a domain error
+                raise RuntimeError(f"LLM stream failed: {exc}") from exc
+
+        return iterator()
+
+    def _build_messages(
+        self, user_message: str, history: list[dict[str, str]] | None
+    ) -> list[dict[str, str]]:
+        """
+        Assemble the message list both request paths send: system prompt,
+        then prior turns, then the new message.
+
+        Validation lives here so streaming rejects an empty message at the
+        call site rather than on first iteration - by which point the HTTP
+        response has already begun and a 400 is no longer possible.
+        """
         if not user_message or not user_message.strip():
             raise ValueError("user_message must not be empty.")
 
@@ -67,16 +140,7 @@ class LLMService:
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": user_message})
-
-        try:
-            completion = self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-            )
-        except Exception as exc:  # noqa: BLE001 - surface as a domain error
-            raise RuntimeError(f"LLM request failed: {exc}") from exc
-
-        return completion.choices[0].message.content or ""
+        return messages
 
 
 @lru_cache
