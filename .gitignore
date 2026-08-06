@@ -6,3 +6,8 @@
 
 # Claude Code local permissions — machine-specific paths, not project config.
 .claude/settings.local.json
+
+# Next.js build output. Also covered by frontend/.gitignore's `/.next/`;
+# stated here too so the rule is visible from the repo root.
+frontend/.next/
+frontend/out/
