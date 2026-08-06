@@ -1,0 +1,42 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.1
+python-dotenv==1.0.1
+
+# AI / RAG stack (installed now, wired up in later tasks)
+openai==1.59.6
+
+# NOTE: pinned to 1.5.9 (not the originally planned 0.5.23) because 0.5.23's
+# transitive `tokenizers` dependency has no prebuilt wheel for Python 3.14
+# and fails to build from source (requires an older Rust/PyO3 toolchain).
+chromadb==1.5.9
+
+# Agent orchestration (StateGraph-based reasoning loop, see agents/assistant_agent.py).
+# NOTE: langchain / langchain-openai / langchain-community were dropped -
+# langgraph 1.x pulls in langchain-core 1.5.0, which is incompatible with
+# the older langchain 0.3.x pins originally planned for the RAG layer. The
+# project doesn't use LangChain's LLM wrappers anywhere (ai/llm_service.py
+# talks to the OpenAI-compatible client directly), so only langgraph itself
+# is needed here - no langchain/langchain-openai dependency required.
+langgraph==1.2.9
+
+# File / document handling (used by future PDF ingestion)
+pypdf==5.1.0
+python-multipart==0.0.20
+
+# Embeddings (local, free, no API key - runs on-device)
+sentence-transformers==3.3.1
+
+# HTTP client for calling external APIs (agents/assistant_agent.py's
+# EXTERNAL_API tool calls the free Open-Meteo weather API).
+requests==2.34.2
+
+# Audio metadata extraction (Phase 5 audio understanding) - pure Python,
+# no ffmpeg/native compilation required, actively maintained.
+mutagen==1.47.0
+
+# Testing
+pytest==8.3.4
+httpx==0.28.1
+pillow==11.1.0

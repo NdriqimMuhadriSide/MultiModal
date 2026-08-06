@@ -1,0 +1,10 @@
+{
+  // Open SQLite databases in the SQLite Viewer table browser instead of the
+  // text editor, which only reports "file is binary".
+  "workbench.editorAssociations": {
+    "*.sqlite3": "sqlite-viewer.view",
+    // Chroma keeps its vector index in separate HNSW binaries alongside this
+    // file, so hand-editing rows here desyncs the two. Read-only on purpose.
+    "**/data/chroma/chroma.sqlite3": "sqlite-viewer.readonly"
+  }
+}

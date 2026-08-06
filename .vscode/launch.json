@@ -1,0 +1,49 @@
+{
+  // Debug configs for the two halves of the app.
+  //
+  // "Full Stack" runs both at once, so a single F5 gets you breakpoints in
+  // ChatInput.tsx *and* llm_service.py on the same send.
+  //
+  // The backend config deliberately omits uvicorn's --reload: the reloader
+  // runs the app in a child process that the debugger never attaches to, so
+  // breakpoints silently never bind. Restart manually after backend edits.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // Client-side React. Expects `npm run dev` to already be running.
+      "name": "Frontend: Chrome",
+      "type": "chrome",
+      "request": "launch",
+      "url": "http://localhost:3000",
+      "webRoot": "${workspaceFolder}/frontend",
+      "sourceMapPathOverrides": {
+        "webpack://_N_E/./*": "${workspaceFolder}/frontend/*",
+        "webpack://_N_E/*": "${workspaceFolder}/frontend/*"
+      }
+    },
+    {
+      "name": "Backend: FastAPI",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["app.main:app", "--port", "8000"],
+      "cwd": "${workspaceFolder}/backend",
+      "python": "${workspaceFolder}/backend/.venv/bin/python",
+      "envFile": "${workspaceFolder}/backend/.env",
+      "console": "integratedTerminal",
+      // Step into our own code only — not FastAPI/openai internals.
+      "justMyCode": true
+    }
+  ],
+  "compounds": [
+    {
+      // No "stopAll": if the backend fails to bind port 8000 (e.g. a uvicorn
+      // is already running elsewhere), stopAll would tear down the Chrome
+      // session too and frontend breakpoints would never bind — which looks
+      // exactly like "my breakpoint doesn't work". Keeping them independent
+      // means a dead backend costs you Python breakpoints only.
+      "name": "Full Stack",
+      "configurations": ["Backend: FastAPI", "Frontend: Chrome"]
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+# Repo-wide ignores. Backend- and frontend-specific rules live in
+# backend/.gitignore and frontend/.gitignore, next to what they apply to.
+
+# macOS
+.DS_Store
+
+# Claude Code local permissions — machine-specific paths, not project config.
+.claude/settings.local.json
