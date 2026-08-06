@@ -95,6 +95,7 @@ All routes are under `/api/v1`.
 | `POST` | `/chat/stream` | Same, streamed token by token over SSE |
 | `GET` | `/chat/{conversation_id}/history` | Full stored history for a conversation |
 | `POST` | `/agent/ask` | LangGraph agent — routes to a tool, then answers |
+| `POST` | `/agent/ask/stream` | Same, streamed over SSE (this is what the UI uses) |
 | `POST` | `/documents/upload` | Upload a PDF |
 | `POST` | `/documents/ingest` | Chunk, embed, and index a document |
 | `GET` | `/documents` | List ingested documents |

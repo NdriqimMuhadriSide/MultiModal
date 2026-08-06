@@ -61,9 +61,18 @@ function toUserFacingError(err: unknown): string {
   return "Something went wrong while contacting the assistant.";
 }
 
+/**
+ * How often buffered tokens are committed to the store, in milliseconds.
+ * ~12 updates/second: below the threshold where text stops looking
+ * continuous, and far below the per-token rate that would thrash
+ * localStorage. Kept in sync with hooks/use-chat.ts.
+ */
+const FLUSH_INTERVAL_MS = 80;
+
 export function useAgent() {
   const activeChat = useChatStore((state) => state.activeChat());
   const appendMessage = useChatStore((state) => state.appendMessage);
+  const appendToMessage = useChatStore((state) => state.appendToMessage);
   const updateMessage = useChatStore((state) => state.updateMessage);
   const setConversationId = useChatStore((state) => state.setConversationId);
 
@@ -85,18 +94,56 @@ export function useAgent() {
       appendMessage(chatId, pendingAssistant);
 
       setIsSending(true);
-      try {
-        const response = await AgentService.ask(trimmed, activeChat.conversationId);
 
-        if (!activeChat.conversationId) {
-          setConversationId(chatId, response.conversation_id);
+      // Tokens are buffered and flushed on an interval rather than written
+      // straight through. Every store write re-serializes all persisted
+      // chats into localStorage, so writing per token would mean hundreds of
+      // full serializations for a single answer. At this cadence the text
+      // still arrives faster than anyone reads it.
+      let buffered = "";
+      let receivedAny = false;
+      const flush = () => {
+        if (!buffered) return;
+        appendToMessage(chatId, pendingAssistant.id, buffered);
+        buffered = "";
+      };
+      const timer = setInterval(flush, FLUSH_INTERVAL_MS);
+
+      try {
+        let streamError = false;
+
+        for await (const event of AgentService.streamAsk(
+          trimmed,
+          activeChat.conversationId
+        )) {
+          if (event.type === "start") {
+            if (!activeChat.conversationId) {
+              setConversationId(chatId, event.conversation_id);
+            }
+          } else if (event.type === "tool") {
+            // Arrives before any text: the bubble can say where the answer
+            // is coming from while it's still being written.
+            updateMessage(chatId, pendingAssistant.id, {
+              status: "streaming",
+              toolUsed: event.tool,
+            });
+          } else if (event.type === "delta") {
+            buffered += event.content;
+            receivedAny = true;
+          } else if (event.type === "error") {
+            // A provider failure after the response had already committed as
+            // 200. Whatever arrived stays on screen — only the status moves.
+            streamError = true;
+          }
         }
 
-        updateMessage(chatId, pendingAssistant.id, {
-          content: response.answer,
-          status: "sent",
-          toolUsed: response.tool_used,
-        });
+        flush();
+        if (streamError) {
+          updateMessage(chatId, pendingAssistant.id, { status: "error" });
+          setError("The assistant's response was cut off. Please try again.");
+        } else {
+          updateMessage(chatId, pendingAssistant.id, { status: "sent" });
+        }
       } catch (err) {
         // Offline with a worker to hand it to: park the request instead of
         // failing it. Only for a genuine network error — a 4xx/5xx means the
@@ -121,16 +168,28 @@ export function useAgent() {
         }
 
         const message = toUserFacingError(err);
+        // Only replace the bubble's text when nothing ever arrived. Once the
+        // user has read half an answer, blanking it to show an error destroys
+        // what they were reading; the error line below is enough.
         updateMessage(chatId, pendingAssistant.id, {
-          content: message,
+          ...(receivedAny ? {} : { content: message }),
           status: "error",
         });
         setError(message);
       } finally {
+        clearInterval(timer);
+        flush();
         setIsSending(false);
       }
     },
-    [activeChat, isSending, appendMessage, updateMessage, setConversationId]
+    [
+      activeChat,
+      isSending,
+      appendMessage,
+      appendToMessage,
+      updateMessage,
+      setConversationId,
+    ]
   );
 
   return {

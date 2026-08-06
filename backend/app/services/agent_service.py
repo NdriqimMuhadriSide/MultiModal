@@ -18,6 +18,7 @@ Two things live here:
    the agent itself is stateless, and conversation history is read from the
    memory layer, not from the graph.
 """
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from fastapi import HTTPException, status
@@ -80,6 +81,56 @@ class AgentChatService:
             answer=result.answer,
             tool_used=result.tool_used,
         )
+
+    def stream_answer(
+        self, message: str, conversation_id: str | None = None
+    ) -> tuple[str, Iterator[dict]]:
+        """
+        The streaming counterpart to `get_answer`, mirroring
+        ChatService.stream_answer - same memory flow, same disconnect
+        handling - with one addition the plain chat path has no equivalent
+        for: the agent's routing decision.
+
+        Returns `(conversation_id, events)`. The events are dicts rather
+        than bare strings because two different things need to reach the
+        client in order:
+
+            {"type": "tool", "tool": "search_knowledge_base"}
+            {"type": "delta", "content": "..."}
+
+        Routing runs inside the generator, not before it. It costs an LLM
+        round trip, and doing it eagerly would delay the endpoint's opening
+        event - the client would sit on an unacknowledged request for as
+        long as the classification takes, which is precisely the dead air
+        streaming exists to remove.
+
+        The assistant's turn is persisted when the stream ends, including
+        when it ends early: `finally` runs on GeneratorExit, so a browser
+        tab closed mid-answer still records the half the user read.
+        """
+        resolved_id = conversation_id or self._memory.new_conversation_id()
+
+        history = self._memory.get_history(resolved_id, limit=self._history_limit)
+        history_messages = [{"role": msg.role, "content": msg.content} for msg in history]
+
+        self._memory.add_message(resolved_id, role="user", content=message)
+
+        def events() -> Iterator[dict]:
+            collected: list[str] = []
+            try:
+                tool_used, chunks = self._agent.stream(message, history=history_messages)
+                yield {"type": "tool", "tool": tool_used}
+                for delta in chunks:
+                    collected.append(delta)
+                    yield {"type": "delta", "content": delta}
+            finally:
+                answer = "".join(collected)
+                if answer.strip():
+                    self._memory.add_message(
+                        resolved_id, role="assistant", content=answer
+                    )
+
+        return resolved_id, events()
 
 
 def get_assistant_agent() -> AssistantAgent:

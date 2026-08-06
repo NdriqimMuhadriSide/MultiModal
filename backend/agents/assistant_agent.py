@@ -42,6 +42,7 @@ needed), but a single-hop routing graph is the clearest way to demonstrate
 the tool-calling architecture without extra moving parts.
 """
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Literal, TypedDict
 
@@ -53,6 +54,11 @@ from prompts.assistant_prompts import format_router_prompt
 from rag.rag_service import RAGService
 
 ToolChoice = Literal["KNOWLEDGE_BASE", "EXTERNAL_API", "DIRECT_ANSWER"]
+
+# What the router's choice is reported as once a tool has actually run.
+# Distinct from ToolChoice: that names the decision, this names the node
+# that produced the answer, and it's the value the UI labels a bubble with.
+ToolUsed = Literal["search_knowledge_base", "call_external_api", "answer_directly"]
 
 # Open-Meteo: free, no API key, no signup - used for the EXTERNAL_API tool
 # so this is a real external call, not a mocked/fake one.
@@ -247,4 +253,55 @@ class AssistantAgent:
         return AgentResult(
             answer=final_state["answer"],
             tool_used=final_state["tool_used"],
+        )
+
+    def stream(
+        self, message: str, history: list[dict[str, str]] | None = None
+    ) -> tuple[ToolUsed, Iterator[str]]:
+        """
+        Route as `run` does, then yield the chosen tool's answer in pieces.
+
+        Returns `(tool_used, chunks)`. Routing is resolved eagerly because
+        the caller wants to tell the user *which* tool is answering before
+        the answer itself arrives - and because routing is a single-shot
+        classification returning one word, there is nothing to stream about
+        it anyway.
+
+        This deliberately does not go through the compiled graph.
+        `graph.invoke` runs to completion and hands back a finished state,
+        which is the one thing a streaming caller cannot use; LangGraph's
+        own streaming APIs stream *state updates between nodes*, not tokens
+        within a node, so they would deliver the same single answer blob one
+        step later. Routing still calls `_route_node`, so the decision logic
+        has exactly one implementation - only the dispatch is restated here.
+
+        Not every branch actually streams, and that is honest rather than a
+        gap: the external-API tool builds its sentence from a weather JSON
+        response with no LLM involved, so there is nothing to arrive
+        incrementally. It yields once.
+
+        Raises:
+            ValueError: if `message` is empty.
+            RuntimeError: if an LLM call fails - possibly mid-stream.
+        """
+        if not message or not message.strip():
+            raise ValueError("message must not be empty.")
+
+        state: AgentState = {"message": message, "history": history or []}
+        tool_choice = self._route_node(state)["tool_choice"]
+
+        if tool_choice == "KNOWLEDGE_BASE":
+            _sources, chunks = self._rag_service.stream_ask(message)
+            return "search_knowledge_base", chunks
+
+        if tool_choice == "EXTERNAL_API":
+            answer = self._call_external_api_node(state)["answer"]
+
+            def single() -> Iterator[str]:
+                yield answer
+
+            return "call_external_api", single()
+
+        return "answer_directly", self._llm_service.stream_response(
+            message, history=history or []
         )

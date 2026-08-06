@@ -6,10 +6,10 @@ from and writes to the conversation memory layer internally), maps domain
 errors to HTTP status codes, and returns the response model. No OpenAI-
 specific code or memory/storage logic lives here.
 """
-import json
-
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
+
+from app.api.v1.sse import SSE_HEADERS, sse_event
 
 from app.schemas.chat import (
     ChatRequest,
@@ -40,19 +40,6 @@ def chat(
         ) from exc
 
     return ChatResponse(conversation_id=result.conversation_id, answer=result.answer)
-
-
-def _sse(event: dict) -> str:
-    """
-    Frame one payload as a Server-Sent Event.
-
-    The blank line is the message terminator - without it the browser buffers
-    the frame forever waiting for the rest. `ensure_ascii=True` (the default)
-    also matters more than it looks: SSE is line-delimited, so a raw newline
-    inside a token would split one event into two malformed ones. JSON
-    escaping it to \\n is what makes arbitrary model output safe to send.
-    """
-    return f"data: {json.dumps(event)}\n\n"
 
 
 @router.post("/chat/stream")
@@ -95,26 +82,19 @@ def chat_stream(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     def events():
-        yield _sse({"type": "start", "conversation_id": conversation_id})
+        yield sse_event({"type": "start", "conversation_id": conversation_id})
         try:
             for delta in chunks:
-                yield _sse({"type": "delta", "content": delta})
+                yield sse_event({"type": "delta", "content": delta})
         except RuntimeError as exc:
-            yield _sse({"type": "error", "detail": str(exc)})
+            yield sse_event({"type": "error", "detail": str(exc)})
             return
-        yield _sse({"type": "done"})
+        yield sse_event({"type": "done"})
 
     return StreamingResponse(
         events(),
         media_type="text/event-stream",
-        headers={
-            # Without these a proxy or the browser will happily hold the
-            # whole stream and hand it over in one piece, which reintroduces
-            # exactly the latency this endpoint exists to remove.
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=SSE_HEADERS,
     )
 
 

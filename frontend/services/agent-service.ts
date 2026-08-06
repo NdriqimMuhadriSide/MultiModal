@@ -12,7 +12,8 @@
  */
 import { apiClient } from "@/lib/api-client";
 import { API_V1_URL } from "@/lib/config";
-import type { AgentAskRequest, AgentAskResponse } from "@/types";
+import { streamSse } from "@/lib/sse";
+import type { AgentAskRequest, AgentAskResponse, AgentStreamEvent } from "@/types";
 
 export const AgentService = {
   /**
@@ -51,5 +52,23 @@ export const AgentService = {
     return apiClient.post<AgentAskResponse, AgentAskRequest>("/agent/ask", body, {
       signal,
     });
+  },
+
+  /**
+   * The streaming form of `ask`: same routing, with the answer yielded as
+   * it is generated and the router's choice arriving as its own event.
+   * See lib/sse.ts for why this can't go through `apiClient` or EventSource.
+   *
+   * `ask` above is kept rather than replaced — the service worker's offline
+   * outbox replays a queued message with no page attached to consume a
+   * stream, and it needs a plain JSON reply.
+   */
+  streamAsk(
+    message: string,
+    conversationId?: string | null,
+    signal?: AbortSignal
+  ): AsyncGenerator<AgentStreamEvent> {
+    const body: AgentAskRequest = { message, conversation_id: conversationId ?? null };
+    return streamSse<AgentStreamEvent>(`${API_V1_URL}/agent/ask/stream`, body, signal);
   },
 };

@@ -36,3 +36,22 @@ export interface AgentAskResponse {
   tool_used: AgentTool;
   conversation_id: string;
 }
+
+/**
+ * One event from POST /api/v1/agent/ask/stream, mirroring the payloads
+ * built in backend/app/api/v1/endpoints/agent.py.
+ *
+ * Order is `start`, then `tool`, then any number of `delta`s, then exactly
+ * one terminator — `done` or `error`, never both.
+ *
+ * `tool` is separate from `start` rather than folded into it because
+ * routing costs an LLM round trip: holding `start` until the router
+ * answered would leave the client with an unacknowledged request for the
+ * whole classification, which is the dead air streaming exists to remove.
+ */
+export type AgentStreamEvent =
+  | { type: "start"; conversation_id: string }
+  | { type: "tool"; tool: AgentTool }
+  | { type: "delta"; content: string }
+  | { type: "done" }
+  | { type: "error"; detail: string };
