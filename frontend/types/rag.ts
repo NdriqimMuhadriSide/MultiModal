@@ -22,6 +22,12 @@ export interface RAGChatSource {
   filename: string;
   page: number;
   chunkId: string;
+  /**
+   * Heading path the cited chunk came from — "2. Methods > 2.1 Field
+   * Sampling". Empty for documents with no detected heading structure, and
+   * for anything ingested before structure extraction existed.
+   */
+  section: string;
 }
 
 /** POST /api/v1/rag/chat response body */

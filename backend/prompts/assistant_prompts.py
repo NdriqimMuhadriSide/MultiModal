@@ -99,3 +99,28 @@ VISION_SYSTEM_PROMPT = (
     "If something is unclear, unreadable, or not visible in the image, say so. "
     "Do not hallucinate details that are not actually present in the image."
 )
+
+
+# Used by agents/assistant_agent.py's second hop, after the knowledge-base
+# tool searched the ingested documents and retrieved nothing.
+#
+# The disclosure instruction is the whole point. Without it the model answers
+# from its own knowledge in the same voice it uses for a document-grounded
+# answer, and a user reading "expense claims must be submitted within 30 days"
+# has no way to tell whether that came from their handbook or from the
+# model's impression of what handbooks usually say. One is a fact about their
+# company; the other is a plausible guess.
+KB_FALLBACK_PROMPT_TEMPLATE = (
+    "The user asked a question and the ingested documents were searched, but "
+    "nothing relevant was found in them.\n\n"
+    "Answer from your own general knowledge instead. Begin by stating plainly "
+    "that this was not found in their documents and that the answer is general "
+    "knowledge rather than something from their materials. If you do not know "
+    "the answer either, say so.\n\n"
+    "Question: {message}"
+)
+
+
+def format_kb_fallback_prompt(message: str) -> str:
+    """Fill KB_FALLBACK_PROMPT_TEMPLATE for a knowledge-base miss."""
+    return KB_FALLBACK_PROMPT_TEMPLATE.format(message=message)

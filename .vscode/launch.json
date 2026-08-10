@@ -33,6 +33,25 @@
       "console": "integratedTerminal",
       // Step into our own code only — not FastAPI/openai internals.
       "justMyCode": true
+    },
+    {
+      // Attaches to a uvicorn already started under debugpy, rather than
+      // launching one. Use when the server is run from a terminal:
+      //
+      //   .venv/bin/python -m debugpy --listen 5678 \
+      //       -m uvicorn app.main:app --port 8000
+      //
+      // The same --reload caveat applies: the reloader's child process is
+      // not the one listening on 5678, so leave --reload off here too.
+      //
+      // Add --wait-for-client to the command above to freeze startup until
+      // this config connects — needed only for breakpoints that fire during
+      // import or app startup, not for ones inside request handlers.
+      "name": "Backend: Attach",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": { "host": "127.0.0.1", "port": 5678 },
+      "justMyCode": true
     }
   ],
   "compounds": [

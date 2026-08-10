@@ -3,7 +3,7 @@ RAG question-answering endpoint.
 
 Pure HTTP layer: parses the request, calls the RAG service, maps domain
 errors to HTTP status codes, and returns the response model. The actual
-embed -> search -> build-context -> prompt -> LLM pipeline lives in
+retrieve -> build-context -> prompt -> LLM pipeline lives in
 rag/rag_service.py, not here.
 """
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -28,8 +28,12 @@ def ask_rag(
     rag_service: RAGService = Depends(get_rag_service),
 ) -> RAGAskResponse:
     """
-    question -> embedding -> Chroma search -> relevant chunks ->
-    prompt with context -> LLM -> answer
+    question -> retrieval (dense and/or BM25, per RETRIEVAL_MODE) ->
+    relevant chunks -> prompt with context -> LLM -> answer
+
+    Each source carries the scores behind its ranking - `similarity` is the
+    cosine one and is null for a chunk only keyword search found - so
+    retrieval quality can be inspected from the response itself.
     """
     try:
         result = rag_service.ask(question=request.question, top_k=request.top_k)
@@ -48,7 +52,13 @@ def ask_rag(
                 chunk_id=source.chunk_id,
                 filename=source.filename,
                 page_number=source.page,
-                similarity=source.score,
+                similarity=source.dense_score,
+                score=source.score,
+                keyword_score=source.keyword_score,
+                rerank_score=source.rerank_score,
+                found_by_query=source.found_by_query,
+                matched_by=source.matched_by,
+                section=source.section,
             )
             for source in result.sources
         ],
@@ -85,6 +95,7 @@ def chat_rag(
                 filename=source.filename,
                 page=source.page,
                 chunk_id=source.chunk_id,
+                section=source.section,
             )
             for source in result.sources
         ],

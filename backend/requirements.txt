@@ -25,6 +25,30 @@ langgraph==1.2.9
 pypdf==5.1.0
 python-multipart==0.0.20
 
+# Word (.docx) ingestion - see rag/loaders/docx.py. A .docx is a zip of XML,
+# so the standard library could open it; python-docx earns its place by
+# resolving paragraph *styles*, which is where the heading signal lives (a
+# w:pStyle reference into styles.xml, with inheritance, and a name that is
+# localised in documents authored in other languages).
+#
+# Markdown, HTML and CSV need no dependency at all: they are parsed with the
+# standard library (re, html.parser, csv) in rag/loaders/.
+python-docx==1.2.0
+
+# OCR fallback for scanned PDFs (rag/ocr.py). pypdfium2 rasterizes a page to
+# an image; pytesseract is a thin wrapper around the Tesseract binary.
+#
+# NOTE: pytesseract does NOT bundle an OCR engine - Tesseract is a separate
+# system install ("brew install tesseract" / "apt-get install tesseract-ocr").
+# Without it, ingestion still works and scanned PDFs are recorded as FAILED
+# with a reason saying so; nothing else in the app is affected.
+#
+# pypdfium2 rather than pdf2image (which shells out to poppler) or PyMuPDF
+# (AGPL): it ships a prebuilt wheel with the renderer inside, so page
+# rasterization needs no system package at all.
+pypdfium2==5.12.1
+pytesseract==0.3.13
+
 # Embeddings (local, free, no API key - runs on-device)
 sentence-transformers==3.3.1
 
@@ -40,3 +64,8 @@ mutagen==1.47.0
 pytest==8.3.4
 httpx==0.28.1
 pillow==11.1.0
+
+# Debugging — required only by the "Backend: Attach" launch config, which
+# connects to a uvicorn started under `python -m debugpy`. The "Backend:
+# FastAPI" launch config does not need this; VS Code injects its own copy.
+debugpy==1.8.21

@@ -4,9 +4,9 @@ RAG (Retrieval-Augmented Generation) service.
 Orchestrates the full pipeline:
 
     user question
-        -> Retriever.retrieve()             (rag/retriever.py: embed
-                                               question -> search ChromaDB
-                                               -> similarity-filtered chunks)
+        -> Retriever.retrieve()             (rag/retriever.py: dense search,
+                                               BM25, or both fused - see
+                                               RETRIEVAL_MODE)
         -> build_context()                  (rag/context_builder.py:
                                                chunks -> Document/Page/
                                                Content text block)
@@ -43,7 +43,25 @@ class RAGSource:
     chunk_id: str
     filename: str
     page: int
+    # The score the ranking was done on - a cosine similarity, a BM25 score or
+    # a fused rank score depending on RETRIEVAL_MODE. See RetrievedChunk in
+    # rag/retriever.py for why this isn't called `similarity`.
     score: float
+    # Heading path the chunk came from (see rag/structure.py); "" when the
+    # document has no detected structure.
+    section: str = ""
+    # Which half of hybrid retrieval surfaced this chunk, and what each scored
+    # it. Carried all the way out to the API response because "the model cited
+    # a chunk that dense search never saw" is the single most useful thing to
+    # know when tuning retrieval.
+    dense_score: float | None = None
+    keyword_score: float | None = None
+    matched_by: str = "dense"
+    # The cross-encoder's verdict, or None when RERANK_ENABLED is off.
+    rerank_score: float | None = None
+    # The query phrasing that found this chunk - the original question
+    # unless MULTI_QUERY_ENABLED is on and a variant got there first.
+    found_by_query: str = ""
 
 
 @dataclass
@@ -52,14 +70,65 @@ class RAGAnswer:
     sources: list[RAGSource]
 
 
+def _to_sources(chunks: list) -> list[RAGSource]:
+    """
+    Project retrieved chunks down to citations - everything about where the
+    text came from, without the text itself (which the model already has).
+
+    One function rather than the same comprehension in `ask` and `stream_ask`,
+    so a field added to retrieval reaches both paths or neither.
+    """
+    return [
+        RAGSource(
+            chunk_id=chunk.chunk_id,
+            filename=chunk.filename,
+            page=chunk.page,
+            score=chunk.score,
+            section=chunk.section,
+            dense_score=chunk.dense_score,
+            keyword_score=chunk.keyword_score,
+            matched_by=chunk.matched_by,
+            rerank_score=chunk.rerank_score,
+            found_by_query=chunk.found_by_query,
+        )
+        for chunk in chunks
+    ]
+
+
 class RAGService:
     """Ties retrieval + context building + prompt construction + LLM generation into one ask() call."""
 
-    def __init__(self, retriever: Retriever, llm_service: LLMService) -> None:
+    def __init__(
+        self,
+        retriever: Retriever,
+        llm_service: LLMService,
+        contextualizer=None,
+    ) -> None:
         self._retriever = retriever
         self._llm_service = llm_service
+        # Optional: without it, `history` is accepted and ignored, which is
+        # exactly the behaviour that existed before contextualization.
+        self._contextualizer = contextualizer
 
-    def ask(self, question: str, top_k: int = DEFAULT_TOP_K) -> RAGAnswer:
+    def _retrieval_query(self, question: str, history) -> str:
+        """
+        The string retrieval should actually search for.
+
+        Differs from the question the *user* asked only for follow-ups in a
+        conversation - see rag/contextualizer.py. The user's own wording is
+        what still reaches the answering prompt, because that is what they
+        want answered; only the search term is rewritten.
+        """
+        if self._contextualizer is None:
+            return question
+        return self._contextualizer.contextualize(question, history)
+
+    def ask(
+        self,
+        question: str,
+        top_k: int = DEFAULT_TOP_K,
+        history: list[dict[str, str]] | None = None,
+    ) -> RAGAnswer:
         """
         Answer `question` using only content retrieved from the vector store.
 
@@ -71,7 +140,9 @@ class RAGService:
                 (propagated from rag.retriever).
             RuntimeError: if the LLM call fails (propagated from llm_service).
         """
-        chunks = self._retriever.retrieve(question, top_k=top_k)
+        chunks = self._retriever.retrieve(
+            self._retrieval_query(question, history), top_k=top_k
+        )
 
         context = build_context(chunks)
         if not context:
@@ -87,20 +158,13 @@ class RAGService:
         prompt = format_rag_prompt(context=context, question=question)
         answer = self._llm_service.generate_response(prompt)
 
-        sources = [
-            RAGSource(
-                chunk_id=chunk.chunk_id,
-                filename=chunk.filename,
-                page=chunk.page,
-                score=chunk.score,
-            )
-            for chunk in chunks
-        ]
-
-        return RAGAnswer(answer=answer, sources=sources)
+        return RAGAnswer(answer=answer, sources=_to_sources(chunks))
 
     def stream_ask(
-        self, question: str, top_k: int = DEFAULT_TOP_K
+        self,
+        question: str,
+        top_k: int = DEFAULT_TOP_K,
+        history: list[dict[str, str]] | None = None,
     ) -> tuple[list[RAGSource], Iterator[str]]:
         """
         The streaming counterpart to `ask`: same pipeline, with the final
@@ -119,7 +183,9 @@ class RAGService:
             ValueError: if `question` is empty or top_k is not positive.
             RuntimeError: if the LLM call fails - possibly mid-stream.
         """
-        chunks = self._retriever.retrieve(question, top_k=top_k)
+        chunks = self._retriever.retrieve(
+            self._retrieval_query(question, history), top_k=top_k
+        )
         context = build_context(chunks)
 
         if not context:
@@ -131,15 +197,5 @@ class RAGService:
 
             return [], no_context()
 
-        sources = [
-            RAGSource(
-                chunk_id=chunk.chunk_id,
-                filename=chunk.filename,
-                page=chunk.page,
-                score=chunk.score,
-            )
-            for chunk in chunks
-        ]
-
         prompt = format_rag_prompt(context=context, question=question)
-        return sources, self._llm_service.stream_response(prompt)
+        return _to_sources(chunks), self._llm_service.stream_response(prompt)

@@ -262,10 +262,17 @@ function SourceList({ sources }: { sources: NonNullable<Message["sources"]> }) {
         {sources.map((source) => (
           <li key={source.chunkId} className="flex items-center gap-1.5">
             <FileText className="size-3.5 shrink-0" />
-            <span className="truncate">{source.filename}</span>
+            <span className="shrink-0">{source.filename}</span>
             <span className="shrink-0 text-muted-foreground/70">
               &middot; Page {source.page}
             </span>
+            {/* The section is the part that tells you *what* was cited, so it
+                takes the flexible width and truncates last. */}
+            {source.section && (
+              <span className="truncate text-muted-foreground/70">
+                &middot; {source.section}
+              </span>
+            )}
           </li>
         ))}
       </ul>

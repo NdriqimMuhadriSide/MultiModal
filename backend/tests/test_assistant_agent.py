@@ -1,7 +1,7 @@
 import pytest
 
 from agents.assistant_agent import AssistantAgent
-from rag.rag_service import RAGAnswer
+from rag.rag_service import RAGAnswer, RAGSource
 
 
 class FakeLLMService:
@@ -26,12 +26,21 @@ class FakeLLMService:
 
 
 class FakeRAGService:
-    def __init__(self) -> None:
+    def __init__(self, sources=None) -> None:
         self.asked_with: str | None = None
+        self.history_seen = None
+        # Grounded by default: an empty source list now means "the documents
+        # had nothing", which the graph routes to the fallback hop.
+        self._sources = (
+            [RAGSource(chunk_id="c0", filename="handbook.pdf", page=1, score=0.9)]
+            if sources is None
+            else sources
+        )
 
-    def ask(self, question: str, top_k: int = 5) -> RAGAnswer:
+    def ask(self, question: str, top_k: int = 5, history=None) -> RAGAnswer:
         self.asked_with = question
-        return RAGAnswer(answer="answer from the knowledge base", sources=[])
+        self.history_seen = history
+        return RAGAnswer(answer="answer from the knowledge base", sources=self._sources)
 
 
 def test_agent_routes_to_knowledge_base_tool():
@@ -148,3 +157,69 @@ def test_agent_external_api_tool_handles_missing_city():
 
     assert result.tool_used == "call_external_api"
     assert "city" in result.answer.lower()
+
+
+# ---------------------------------------------------------------------------
+# Agentic RAG: history-aware retrieval and the second hop
+# ---------------------------------------------------------------------------
+
+
+def test_the_knowledge_base_tool_is_given_the_conversation():
+    """
+    The bug this fixes: retrieval used to see only the follow-up's own words,
+    so "how far ahead do I have to request it?" searched for six words with no
+    idea what "it" was.
+    """
+    llm = FakeLLMService(routing_response="KNOWLEDGE_BASE")
+    rag = FakeRAGService()
+    agent = AssistantAgent(llm_service=llm, rag_service=rag)
+    history = [{"role": "user", "content": "how much annual leave do I accrue?"}]
+
+    agent.run("how far ahead do I have to request it?", history=history)
+
+    assert rag.history_seen == history
+
+
+def test_an_empty_knowledge_base_takes_a_second_hop_instead_of_dead_ending():
+    """
+    Before, a mis-route to KNOWLEDGE_BASE was terminal: a question the
+    documents happened not to cover returned "I don't know" even when it was
+    perfectly answerable, because the router's one guess was also its last.
+    """
+    llm = FakeLLMService(routing_response="KNOWLEDGE_BASE")
+    agent = AssistantAgent(llm_service=llm, rag_service=FakeRAGService(sources=[]))
+
+    result = agent.run("something the documents do not cover")
+
+    assert result.tool_used == "answer_directly_after_knowledge_base"
+    assert result.answer != "answer from the knowledge base"
+
+
+def test_a_grounded_knowledge_base_answer_does_not_take_the_second_hop():
+    llm = FakeLLMService(routing_response="KNOWLEDGE_BASE")
+    agent = AssistantAgent(llm_service=llm, rag_service=FakeRAGService())
+
+    result = agent.run("what does my handbook say about leave?")
+
+    assert result.tool_used == "search_knowledge_base"
+    assert result.answer == "answer from the knowledge base"
+
+
+def test_the_fallback_answer_is_told_to_disclose_it_is_not_from_the_documents():
+    """
+    An answer that silently switches from "grounded in your documents" to
+    "from the model's memory" is the most misleading thing this can do.
+    """
+    llm = FakeLLMService(routing_response="KNOWLEDGE_BASE")
+    agent = AssistantAgent(llm_service=llm, rag_service=FakeRAGService(sources=[]))
+
+    agent.run("something uncovered")
+
+    assert "not found in their documents" in llm.prompts_seen[-1]
+
+
+def test_the_other_tools_are_unaffected_by_the_new_edge():
+    llm = FakeLLMService(routing_response="DIRECT_ANSWER")
+    agent = AssistantAgent(llm_service=llm, rag_service=FakeRAGService(sources=[]))
+
+    assert agent.run("what is the capital of France?").tool_used == "answer_directly"

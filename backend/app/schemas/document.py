@@ -25,6 +25,9 @@ class DocumentChunk(BaseModel):
     page_number: int
     chunk_index: int
     text: str
+    # Heading path this chunk sits under ("2. Methods > 2.1 Field Sampling"),
+    # or "" for text under no heading.
+    section: str = ""
 
 
 class DocumentIngestResponse(BaseModel):
@@ -42,6 +45,25 @@ class DocumentUploadResponse(BaseModel):
     document_id: str = Field(..., alias="documentId")
     chunks_created: int = Field(..., alias="chunksCreated")
     status: str
+    # True when these exact bytes were already ingested, so the existing
+    # document was returned rather than a duplicate created. The response is
+    # otherwise indistinguishable from a fresh upload, and the UI wants to
+    # say "already uploaded" instead of "uploaded".
+    deduplicated: bool = False
+    # Present only when status is FAILED. A FAILED upload still returns 200
+    # (the request was fine; the file just had no usable text), so this is the
+    # only way the uploader can tell the user what actually happened.
+    failure_reason: str | None = Field(default=None, alias="failureReason")
+
+
+class DocumentDeleteResponse(BaseModel):
+    """Response body for DELETE /documents/{document_id}."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    document_id: str = Field(..., alias="documentId")
+    filename: str
+    chunks_deleted: int = Field(..., alias="chunksDeleted")
 
 
 class DocumentSummary(BaseModel):
@@ -55,6 +77,17 @@ class DocumentSummary(BaseModel):
     chunk_count: int = Field(..., alias="chunkCount")
     status: str
     created_at: str = Field(..., alias="createdAt")
+    # Why a FAILED document failed; None for PROCESSING/READY.
+    failure_reason: str | None = Field(default=None, alias="failureReason")
+    # What the document says about itself (rag/metadata.py). `title` is always
+    # present - it falls back to the first heading, then the filename - so the
+    # UI can show it instead of "8f2a-final-v3-FINAL.pdf".
+    title: str | None = None
+    author: str | None = None
+    subject: str | None = None
+    # ISO 8601 date carried by the document, distinct from createdAt (when it
+    # was uploaded here).
+    document_date: str | None = Field(default=None, alias="documentDate")
 
 
 class DocumentListResponse(BaseModel):
@@ -69,11 +102,24 @@ class DocumentSearchResult(BaseModel):
     page_number: int
     similarity: float
     text: str
+    # Where in the document this chunk came from, so a result can be shown as
+    # "report.pdf · p12 · 2. Methods > 2.1 Field Sampling".
+    section: str = ""
+    title: str = ""
+    author: str = ""
 
 
 class DocumentSearchRequest(BaseModel):
     query: str = Field(..., min_length=1, description="Search query text.")
     top_k: int = Field(default=5, ge=1, le=50, description="Number of results to return.")
+    # Exact-match metadata filters, applied before ranking. Similarity can't
+    # answer "anything by the compliance team" - no embedding encodes an
+    # author - so these are the axis the query itself cannot reach.
+    author: str | None = Field(default=None, description="Only chunks from documents by this author.")
+    title: str | None = Field(default=None, description="Only chunks from the document with this title.")
+    document_date: str | None = Field(
+        default=None, description="Only chunks from documents carrying this ISO 8601 date."
+    )
 
 
 class DocumentSearchResponse(BaseModel):

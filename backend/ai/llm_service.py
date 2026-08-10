@@ -43,12 +43,22 @@ class LLMService:
         self._model = model
 
     def generate_response(
-        self, user_message: str, history: list[dict[str, str]] | None = None
+        self,
+        user_message: str,
+        history: list[dict[str, str]] | None = None,
+        system_prompt: str = SYSTEM_PROMPT,
     ) -> str:
         """
-        Send a user message to the model, prefixed with the shared system
-        prompt and (optionally) prior conversation turns, and return the
-        generated text.
+        Send a user message to the model, prefixed with a system prompt and
+        (optionally) prior conversation turns, and return the generated text.
+
+        `system_prompt` defaults to the shared assistant prompt. Callers with a
+        different output contract - rag/chunking/propositional.py wants one
+        fact per line, rag/chunking/contextual.py wants a single sentence -
+        pass their own, exactly as ai/vision_service.py already allows. This is
+        the only supported way to change the model's behaviour here; the
+        client, error handling and message assembly stay identical for every
+        caller.
 
         `history` is a list of {"role": "user"|"assistant", "content": str}
         dicts, oldest first - this is exactly the shape
@@ -64,7 +74,7 @@ class LLMService:
         try:
             completion = self._client.chat.completions.create(
                 model=self._model,
-                messages=self._build_messages(user_message, history),
+                messages=self._build_messages(user_message, history, system_prompt),
             )
         except Exception as exc:  # noqa: BLE001 - surface as a domain error
             raise RuntimeError(f"LLM request failed: {exc}") from exc
@@ -123,7 +133,10 @@ class LLMService:
         return iterator()
 
     def _build_messages(
-        self, user_message: str, history: list[dict[str, str]] | None
+        self,
+        user_message: str,
+        history: list[dict[str, str]] | None,
+        system_prompt: str = SYSTEM_PROMPT,
     ) -> list[dict[str, str]]:
         """
         Assemble the message list both request paths send: system prompt,
@@ -136,7 +149,7 @@ class LLMService:
         if not user_message or not user_message.strip():
             raise ValueError("user_message must not be empty.")
 
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages = [{"role": "system", "content": system_prompt}]
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": user_message})

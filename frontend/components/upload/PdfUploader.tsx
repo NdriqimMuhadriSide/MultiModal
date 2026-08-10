@@ -1,5 +1,5 @@
 /**
- * PdfUploader — drag & drop or click to select a PDF, then upload it for
+ * PdfUploader — drag & drop or click to select a document, then upload it for
  * ingestion into the knowledge base.
  *
  * Purely UI + orchestration boundary, same split as ImageUploader/useVision:
@@ -19,7 +19,7 @@ import { useCallback, useRef, useState, type DragEvent } from "react";
 import { FileText, Loader2, UploadCloud, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { validatePdfFile } from "@/lib/validate-pdf";
-import { SUPPORTED_PDF_MIME_TYPE } from "@/types";
+import { SUPPORTED_DOCUMENT_EXTENSIONS } from "@/types";
 import { cn } from "@/lib/utils";
 
 interface PdfUploaderProps {
@@ -146,14 +146,16 @@ export function PdfUploader({
       >
         <UploadCloud className="size-8 text-muted-foreground" />
         <p className="text-sm font-medium">
-          Drag & drop a PDF here, or click to browse
+          Drag & drop a document here, or click to browse
         </p>
-        <p className="text-xs text-muted-foreground">PDF only, up to 20MB</p>
+        <p className="text-xs text-muted-foreground">
+          PDF, Word, HTML, Markdown, CSV or text &mdash; up to 20MB
+        </p>
       </div>
       <input
         ref={inputRef}
         type="file"
-        accept={SUPPORTED_PDF_MIME_TYPE}
+        accept={SUPPORTED_DOCUMENT_EXTENSIONS.join(",")}
         className="hidden"
         onChange={handleInputChange}
         disabled={isBusy}

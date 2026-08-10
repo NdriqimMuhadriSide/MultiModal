@@ -230,17 +230,70 @@ def test_agent_stream_direct_answer_streams_token_by_token():
 def test_agent_stream_knowledge_base_delegates_to_rag_streaming():
     from agents.assistant_agent import AssistantAgent
 
-    class FakeRag:
-        def stream_ask(self, question, top_k=None):
-            return [], iter(["from ", "the docs"])
+    from rag.rag_service import RAGSource
 
+    class FakeRag:
+        def __init__(self, sources):
+            self.sources = sources
+            self.history_seen = None
+
+        def stream_ask(self, question, top_k=None, history=None):
+            self.history_seen = history
+            return self.sources, iter(["from ", "the docs"])
+
+    grounded = [RAGSource(chunk_id="c0", filename="d.pdf", page=1, score=0.9)]
     agent = AssistantAgent(
-        llm_service=RoutingLLM("KNOWLEDGE_BASE", []), rag_service=FakeRag()
+        llm_service=RoutingLLM("KNOWLEDGE_BASE", []), rag_service=FakeRag(grounded)
     )
 
     tool, chunks = agent.stream("what do my docs say?")
     assert tool == "search_knowledge_base"
     assert list(chunks) == ["from ", "the docs"]
+
+
+def test_agent_stream_falls_back_when_the_knowledge_base_is_empty():
+    """
+    The streaming path does not run the compiled graph, so it has to make the
+    same second-hop decision itself. If these two ever disagree, the UI (which
+    uses the streaming endpoint) behaves differently from every test of the
+    graph.
+    """
+    from agents.assistant_agent import AssistantAgent
+    from rag.rag_service import RAGSource
+
+    class EmptyRag:
+        def stream_ask(self, question, top_k=None, history=None):
+            return [], iter(["should not be used"])
+
+    llm = RoutingLLM("KNOWLEDGE_BASE", ["general ", "knowledge"])
+    agent = AssistantAgent(llm_service=llm, rag_service=EmptyRag())
+
+    tool, chunks = agent.stream("something the docs do not cover")
+
+    assert tool == "answer_directly_after_knowledge_base"
+    assert list(chunks) == ["general ", "knowledge"]
+
+
+def test_agent_stream_hands_history_to_retrieval():
+    """Retrieval can only resolve a follow-up if it is given the turns before it."""
+    from agents.assistant_agent import AssistantAgent
+    from rag.rag_service import RAGSource
+
+    class FakeRag:
+        def __init__(self):
+            self.history_seen = None
+
+        def stream_ask(self, question, top_k=None, history=None):
+            self.history_seen = history
+            return [RAGSource(chunk_id="c", filename="d.pdf", page=1, score=0.9)], iter(["x"])
+
+    rag = FakeRag()
+    agent = AssistantAgent(llm_service=RoutingLLM("KNOWLEDGE_BASE", []), rag_service=rag)
+    history = [{"role": "user", "content": "how much leave do I accrue?"}]
+
+    list(agent.stream("how far ahead do I request it?", history=history)[1])
+
+    assert rag.history_seen == history
 
 
 def test_agent_stream_external_api_yields_once(monkeypatch):

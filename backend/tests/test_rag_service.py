@@ -38,6 +38,10 @@ def _rag_service(results: list[SearchResult], llm: FakeLLMService, min_similarit
         embedding_service=FakeEmbeddingService(),
         vector_store=FakeVectorStore(results),
         min_similarity=min_similarity,
+        # Pinned rather than left to RETRIEVAL_MODE: these tests are about
+        # what RAGService does with retrieved chunks, and would otherwise
+        # start needing a keyword index the moment the default mode changes.
+        mode="dense",
     )
     return RAGService(retriever=retriever, llm_service=llm)
 

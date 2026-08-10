@@ -1,5 +1,5 @@
 /**
- * useDocuments — orchestrates uploading a PDF and listing uploaded documents.
+ * useDocuments — orchestrates uploading a document and listing uploaded documents.
  *
  * This is the boundary between UI and the API for the document ingestion
  * feature: PdfUploader and the documents list component call
@@ -29,16 +29,28 @@ function toUserFacingError(err: unknown): string {
       return "Backend Offline. Check that the API server is running and try again.";
     }
     if (err.status === 413) {
-      return "That PDF is too large for the server to accept.";
+      return "That file is too large for the server to accept.";
     }
     if (err.status >= 500) {
-      return "The document service ran into a problem ingesting that PDF.";
+      return "The document service ran into a problem ingesting that file.";
     }
     if (err.status >= 400) {
-      return "That file couldn't be processed. Please try a different PDF.";
+      return "That file couldn't be processed. Please try a different document.";
     }
   }
   return "Something went wrong while uploading the document.";
+}
+
+function toDeleteError(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.status === null) {
+      return "Backend Offline. Check that the API server is running and try again.";
+    }
+    if (err.status >= 500) {
+      return "The document service ran into a problem deleting that document.";
+    }
+  }
+  return "Something went wrong while deleting the document.";
 }
 
 export function useDocuments() {
@@ -46,6 +58,9 @@ export function useDocuments() {
   const [isLoading, setIsLoading] = useState(true);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  // The id currently being deleted, so only that row shows a pending state
+  // instead of the whole list going busy.
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const refreshDocuments = useCallback(async (signal?: AbortSignal) => {
@@ -96,13 +111,38 @@ export function useDocuments() {
     [isUploading, refreshDocuments]
   );
 
+  const deleteDocument = useCallback(async (documentId: string) => {
+    setError(null);
+    setDeletingId(documentId);
+    try {
+      await DocumentService.deleteDocument(documentId);
+    } catch (err) {
+      // 404 means it is already gone — the desired end state either way, so
+      // it falls through to the same local removal rather than showing an
+      // error for something the user asked for and got.
+      if (!(err instanceof ApiError && err.status === 404)) {
+        setError(toDeleteError(err));
+        return;
+      }
+    } finally {
+      setDeletingId(null);
+    }
+
+    // Removed locally rather than re-fetched: unlike upload, the response
+    // tells us exactly which document went, so a round trip would only add
+    // latency to a list we can already compute.
+    setDocuments((current) => current.filter((doc) => doc.documentId !== documentId));
+  }, []);
+
   return {
     documents,
     isLoading,
     isUploading,
     uploadProgress,
+    deletingId,
     error,
     uploadDocument,
+    deleteDocument,
     refreshDocuments,
   };
 }

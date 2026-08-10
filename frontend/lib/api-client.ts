@@ -163,6 +163,9 @@ export const apiClient = {
   get: <TResponse>(path: string, options?: Omit<RequestOptions, "method" | "body">) =>
     request<TResponse>(path, { ...options, method: "GET" }),
 
+  del: <TResponse>(path: string, options?: Omit<RequestOptions, "method" | "body">) =>
+    request<TResponse>(path, { ...options, method: "DELETE" }),
+
   post: <TResponse, TBody = unknown>(
     path: string,
     body?: TBody,

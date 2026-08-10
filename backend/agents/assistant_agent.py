@@ -50,7 +50,7 @@ import requests
 from langgraph.graph import END, StateGraph
 
 from ai.llm_service import LLMService
-from prompts.assistant_prompts import format_router_prompt
+from prompts.assistant_prompts import format_kb_fallback_prompt, format_router_prompt
 from rag.rag_service import RAGService
 
 ToolChoice = Literal["KNOWLEDGE_BASE", "EXTERNAL_API", "DIRECT_ANSWER"]
@@ -58,7 +58,15 @@ ToolChoice = Literal["KNOWLEDGE_BASE", "EXTERNAL_API", "DIRECT_ANSWER"]
 # What the router's choice is reported as once a tool has actually run.
 # Distinct from ToolChoice: that names the decision, this names the node
 # that produced the answer, and it's the value the UI labels a bubble with.
-ToolUsed = Literal["search_knowledge_base", "call_external_api", "answer_directly"]
+ToolUsed = Literal[
+    "search_knowledge_base",
+    "call_external_api",
+    "answer_directly",
+    # Reported when the knowledge base was tried first and had nothing, so
+    # the UI can label the bubble honestly rather than as a plain direct
+    # answer that never consulted the documents.
+    "answer_directly_after_knowledge_base",
+]
 
 # Open-Meteo: free, no API key, no signup - used for the EXTERNAL_API tool
 # so this is a real external call, not a mocked/fake one.
@@ -81,6 +89,9 @@ class AgentState(TypedDict, total=False):
     tool_choice: ToolChoice
     answer: str
     tool_used: str
+    # Whether the knowledge-base tool actually retrieved anything. Read by
+    # the conditional edge out of that node.
+    grounded: bool
 
 
 @dataclass
@@ -167,9 +178,27 @@ class AssistantAgent:
         return {"tool_choice": tool_choice}
 
     def _search_knowledge_base_node(self, state: AgentState) -> AgentState:
-        """Tool 1: delegate to the existing RAG pipeline (embed -> Chroma -> LLM)."""
-        result = self._rag_service.ask(state["message"])
-        return {"answer": result.answer, "tool_used": "search_knowledge_base"}
+        """
+        Tool 1: delegate to the RAG pipeline (retrieve -> context -> LLM).
+
+        History is handed over so retrieval can resolve a follow-up against
+        the turns before it (rag/contextualizer.py). It reaches the *search*,
+        not the answer: what gets answered is still the question the user
+        asked, in their words.
+
+        `grounded` records whether anything was actually retrieved, which is
+        what the graph's conditional edge reads to decide if a second hop is
+        needed. It is not derivable from the answer text - a refusal and a
+        real answer are both just strings.
+        """
+        result = self._rag_service.ask(
+            state["message"], history=state.get("history")
+        )
+        return {
+            "answer": result.answer,
+            "tool_used": "search_knowledge_base",
+            "grounded": bool(result.sources),
+        }
 
     def _call_external_api_node(self, state: AgentState) -> AgentState:
         """Tool 2: call a real external API (Open-Meteo) for live data."""
@@ -194,6 +223,28 @@ class AssistantAgent:
         )
         return {"answer": answer, "tool_used": "answer_directly"}
 
+    def _fallback_answer_node(self, state: AgentState) -> AgentState:
+        """
+        Second hop: the knowledge base was searched and had nothing, so answer
+        from the model's own knowledge instead - and say so.
+
+        This is what the graph gains by not being single-hop. Before, a
+        mis-route to KNOWLEDGE_BASE was terminal: a question the documents
+        happened not to cover returned "I don't know" even when it was
+        perfectly answerable, because the router's one guess was also its
+        last. Now a failed tool is a fact the graph can act on.
+
+        The disclosure is not decoration. An answer that silently switched
+        from "grounded in your documents" to "from the model's memory" is the
+        single most misleading thing a document assistant can do, and the
+        prompt makes the model open with the distinction.
+        """
+        answer = self._llm_service.generate_response(
+            format_kb_fallback_prompt(state["message"]),
+            history=state.get("history"),
+        )
+        return {"answer": answer, "tool_used": "answer_directly_after_knowledge_base"}
+
     # ---- Graph wiring ------------------------------------------------------
 
     def _build_graph(self):
@@ -203,6 +254,7 @@ class AssistantAgent:
         graph.add_node("search_knowledge_base", self._search_knowledge_base_node)
         graph.add_node("call_external_api", self._call_external_api_node)
         graph.add_node("answer_directly", self._answer_directly_node)
+        graph.add_node("fallback_answer", self._fallback_answer_node)
 
         graph.set_entry_point("route")
 
@@ -218,10 +270,22 @@ class AssistantAgent:
             },
         )
 
-        # All three tool nodes are terminal - this agent makes exactly one
-        # routing decision and one tool call per request (no looping back
-        # to "route" for a second decision).
-        graph.add_edge("search_knowledge_base", END)
+        # The knowledge-base tool is the one that can come back empty, so it
+        # is the one with a second hop: retrieval found nothing -> answer from
+        # the model instead, with that fact disclosed. The other two always
+        # produce something, so they stay terminal.
+        #
+        # This is a conditional edge rather than a loop back to "route" on
+        # purpose. Re-routing would ask the same router the same question and
+        # get the same answer, since nothing about the message changed - the
+        # new information is about the *tool result*, and the edge that reads
+        # it is where that information belongs.
+        graph.add_conditional_edges(
+            "search_knowledge_base",
+            lambda state: "grounded" if state.get("grounded") else "empty",
+            {"grounded": END, "empty": "fallback_answer"},
+        )
+        graph.add_edge("fallback_answer", END)
         graph.add_edge("call_external_api", END)
         graph.add_edge("answer_directly", END)
 
@@ -291,8 +355,20 @@ class AssistantAgent:
         tool_choice = self._route_node(state)["tool_choice"]
 
         if tool_choice == "KNOWLEDGE_BASE":
-            _sources, chunks = self._rag_service.stream_ask(message)
-            return "search_knowledge_base", chunks
+            sources, chunks = self._rag_service.stream_ask(
+                message, history=history or []
+            )
+            if sources:
+                return "search_knowledge_base", chunks
+            # Nothing was retrieved. The graph's conditional edge would send
+            # this to the fallback node; the streaming path has to make the
+            # same move itself, because it deliberately does not run the
+            # compiled graph (see this method's docstring). Restating the
+            # decision is the cost of streaming tokens rather than states -
+            # so both paths are covered by tests that assert they agree.
+            return "answer_directly_after_knowledge_base", self._llm_service.stream_response(
+                format_kb_fallback_prompt(message), history=history or []
+            )
 
         if tool_choice == "EXTERNAL_API":
             answer = self._call_external_api_node(state)["answer"]

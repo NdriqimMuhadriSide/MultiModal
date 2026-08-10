@@ -19,6 +19,8 @@ class StubRAGService:
                     filename="policy.pdf",
                     page=1,
                     score=0.75,
+                    dense_score=0.75,
+                    matched_by="dense",
                 )
             ],
         )
@@ -41,6 +43,8 @@ def test_ask_rag_returns_answer_and_sources():
     assert len(body["sources"]) == 1
     assert body["sources"][0]["chunk_id"] == "policy.pdf::p1::c0"
     assert body["sources"][0]["similarity"] == 0.75
+    assert body["sources"][0]["score"] == 0.75
+    assert body["sources"][0]["matched_by"] == "dense"
 
 
 def test_ask_rag_rejects_empty_question():
@@ -68,7 +72,7 @@ def test_chat_rag_returns_answer_and_camel_case_sources():
     assert body["answer"] == "stub answer for: What is our refund policy?"
     assert len(body["sources"]) == 1
     source = body["sources"][0]
-    assert set(source.keys()) == {"filename", "page", "chunkId"}
+    assert set(source.keys()) == {"filename", "page", "chunkId", "section"}
     assert source["filename"] == "policy.pdf"
     assert source["page"] == 1
     assert source["chunkId"] == "policy.pdf::p1::c0"
