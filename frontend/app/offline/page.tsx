@@ -61,6 +61,30 @@ export default function OfflinePage() {
       <p style={{ margin: 0, fontSize: "0.8125rem", opacity: 0.5 }}>
         Check your connection and reload.
       </p>
+
+      {/* A bare <a>, not next/link and not the shared BackLink, for the same
+          reason the rest of this file is inline-styled: none of the app's
+          JavaScript is running when this page does its job. An anchor is the
+          one navigation primitive that works with nothing but the HTML
+          document - and it is worth having, because the service worker serves
+          the chat shell from cache, so going home often succeeds even while
+          the network is still down. */}
+      {/* eslint-disable-next-line @next/next/no-html-link-for-pages --
+          The rule exists to stop a full page reload replacing client-side
+          navigation. Here a full reload is the only thing that CAN work:
+          next/link needs the router, the router needs the app bundle, and the
+          premise of this page is that the bundle did not load. */}
+      <a
+        href="/"
+        style={{
+          marginTop: "0.5rem",
+          fontSize: "0.875rem",
+          color: "inherit",
+          opacity: 0.75,
+        }}
+      >
+        ← Back to chat
+      </a>
     </div>
   );
 }

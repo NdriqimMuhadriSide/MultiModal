@@ -18,6 +18,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { BackLink } from "@/components/layout/BackLink";
 import { Header } from "@/components/layout/Header";
 import { CameraStream } from "@/components/streaming/CameraStream";
 import { ScreenShare } from "@/components/streaming/ScreenShare";
@@ -78,6 +79,7 @@ export default function StreamingPage() {
       <Header />
       <main className="mx-auto flex w-full max-w-4xl flex-1 flex-col gap-6 overflow-y-auto px-4 py-8 sm:px-6">
         <div>
+          <BackLink className="mb-1" />
           <h1 className="text-lg font-semibold tracking-tight">Live Streaming</h1>
           <p className="text-sm text-muted-foreground">
             Analyze your camera or screen in real time. Frames are sampled
