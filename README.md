@@ -226,6 +226,8 @@ Read that as a signal, not a benchmark, and read the margin sceptically. The set
 
 That one case is the interesting one: a blank page, which the agent declined and the baseline described anyway. The agent's own failure is instructive in the other direction — a low-resolution total read as `84.80` instead of `84.50`, attributed in the answer to `read_text`, so the trace says exactly where the error entered.
 
+> **These numbers were measured on `llama-3.3-70b-versatile`, which Groq retired in August 2026.** The default is now `openai/gpt-oss-120b`. Every prompt in `agents/` was tuned against the old model, so the figures above — and the agentic-RAG ones — describe a model this project no longer runs. Re-run `python -m evals.runner` before quoting them. Retrieval-only measurements (reranking, fusion, hybrid) are unaffected: nothing in that path calls an LLM.
+
 Accuracy alone can't tell an agent that *decided* how to read an image from one that runs every tool on everything, so the cases assert on tools too: which the run must have called, and which it must **not** have.
 
 ### The three things a tree gets silently wrong

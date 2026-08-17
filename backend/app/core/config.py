@@ -32,7 +32,18 @@ class Settings(BaseSettings):
 
     # --- Groq (current active provider for /chat and /vision - free tier, OpenAI-compatible API) ---
     groq_api_key: str = Field(default="", alias="GROQ_API_KEY")
-    groq_model: str = Field(default="llama-3.3-70b-versatile", alias="GROQ_MODEL")
+    # Groq retired llama-3.3-70b-versatile - the default until August 2026 -
+    # and requests for it now come back 404 model_not_found rather than
+    # deprecated, so there is no warning period to notice. gpt-oss-120b is the
+    # most capable text model left on the free tier.
+    #
+    # This is worth reading before trusting anything measured earlier. Every
+    # prompt in agents/ was written and tuned against Llama 3.3, and so were
+    # the eval figures in the README - the Thought/Action contract, the
+    # parse-failure ceilings, the critic's JSON verdicts. A different model
+    # family holds a free-text format differently, so re-run evals/runner.py
+    # rather than assuming those numbers carried over.
+    groq_model: str = Field(default="openai/gpt-oss-120b", alias="GROQ_MODEL")
     groq_vision_model: str = Field(default="qwen/qwen3.6-27b", alias="GROQ_VISION_MODEL")
     groq_base_url: str = Field(default="https://api.groq.com/openai/v1", alias="GROQ_BASE_URL")
 
