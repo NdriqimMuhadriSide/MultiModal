@@ -32,25 +32,80 @@ from prompts.assistant_prompts import SYSTEM_PROMPT
 class LLMService:
     """Wraps an OpenAI-compatible client for simple text-in / text-out completions."""
 
-    def __init__(self, api_key: str, model: str, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        base_url: str | None = None,
+        max_retries: int = 2,
+        timeout: float = 60.0,
+    ) -> None:
         if not api_key:
             raise ValueError(
                 "GROQ_API_KEY is not set. Add it to your .env file before "
                 "calling the LLM service."
             )
 
-        self._client = OpenAI(api_key=api_key, base_url=base_url)
+        # Both arguments have SDK defaults, and both are passed anyway.
+        #
+        # `max_retries` is 2 by default - the SDK retries 408, 409, 429 and
+        # 5xx with exponential backoff, and does *not* retry a 400 or a 401,
+        # which is the right split. Naming it means a reader of this file
+        # can see that retrying happens at all; inherited silently, it is
+        # behaviour nobody knows they have until they need to change it.
+        #
+        # `timeout` is the one that needed changing. The SDK default is a
+        # 600-second read timeout, and these calls are made from
+        # synchronous routes in FastAPI's threadpool - so a hung connection
+        # holds a worker for ten minutes, and retries multiply that.
+        # Failing after a minute frees the worker for someone else.
+        #
+        # Retries are per-request, so a stream that dies after the first
+        # token is not retried: the SDK cannot un-send tokens the client
+        # has already read. Callers of `stream_response` still have to
+        # handle a mid-stream RuntimeError.
+        self._client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            max_retries=max_retries,
+            timeout=timeout,
+        )
         self._model = model
+
+    def _sampling(self, temperature: float | None) -> dict:
+        """
+        Build the sampling kwargs for a completion call.
+
+        Returns an empty dict when `temperature` is None, so the request is
+        byte-identical to the one this class sent before sampling was
+        configurable. That matters: /chat, the RAG answer step and the
+        chunking helpers were all tuned - informally, but tuned - against
+        the provider's own default, and silently moving them because a
+        different caller wanted determinism would change answers nobody
+        asked to change.
+
+        Opting in, rather than defaulting to 0, is the conservative
+        direction. The callers that genuinely need determinism are the ones
+        parsing the output (the agent loops), and they know who they are.
+        """
+        return {} if temperature is None else {"temperature": temperature}
 
     def generate_response(
         self,
         user_message: str,
         history: list[dict[str, str]] | None = None,
         system_prompt: str = SYSTEM_PROMPT,
+        temperature: float | None = None,
     ) -> str:
         """
         Send a user message to the model, prefixed with a system prompt and
         (optionally) prior conversation turns, and return the generated text.
+
+        `temperature` is left unset by default (see `_sampling`). Pass 0 when
+        the reply is going to be *parsed* rather than read - a Thought/Action
+        pair, a routing keyword, a JSON object. Sampling noise in a reply
+        that has to match a grammar shows up as a parse failure, which is
+        easy to misread as a prompt problem.
 
         `system_prompt` defaults to the shared assistant prompt. Callers with a
         different output contract - rag/chunking/propositional.py wants one
@@ -75,6 +130,7 @@ class LLMService:
             completion = self._client.chat.completions.create(
                 model=self._model,
                 messages=self._build_messages(user_message, history, system_prompt),
+                **self._sampling(temperature),
             )
         except Exception as exc:  # noqa: BLE001 - surface as a domain error
             raise RuntimeError(f"LLM request failed: {exc}") from exc
@@ -82,7 +138,10 @@ class LLMService:
         return completion.choices[0].message.content or ""
 
     def stream_response(
-        self, user_message: str, history: list[dict[str, str]] | None = None
+        self,
+        user_message: str,
+        history: list[dict[str, str]] | None = None,
+        temperature: float | None = None,
     ) -> Iterator[str]:
         """
         Same request as `generate_response`, yielded token by token instead
@@ -117,6 +176,7 @@ class LLMService:
                     model=self._model,
                     messages=messages,
                     stream=True,
+                    **self._sampling(temperature),
                 )
                 for chunk in stream:
                     # The final chunk carries finish_reason and an empty
@@ -163,4 +223,6 @@ def get_llm_service() -> LLMService:
         api_key=settings.groq_api_key,
         model=settings.groq_model,
         base_url=settings.groq_base_url,
+        max_retries=settings.llm_max_retries,
+        timeout=settings.llm_timeout_seconds,
     )

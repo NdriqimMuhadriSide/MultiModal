@@ -9,6 +9,12 @@ data/chroma/*
 !data/chroma/.gitkeep
 data/conversations.sqlite3
 data/documents.sqlite3
+data/embedding_cache.sqlite3
+# Images and audio, kept so a turn's attachment_ref still resolves after the
+# response. User content, and content-addressed, so there is nothing here
+# worth committing.
+data/attachments/*
+!data/attachments/.gitkeep
 .pytest_cache/
 *.egg-info/
 .DS_Store

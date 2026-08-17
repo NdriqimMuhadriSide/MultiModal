@@ -12,3 +12,4 @@ export * from "./health";
 export * from "./rag";
 export * from "./streaming";
 export * from "./vision";
+export * from "./vision-agent";

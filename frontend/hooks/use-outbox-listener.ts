@@ -41,6 +41,8 @@ export function useOutboxListener(): void {
           content: data.answer,
           status: "sent",
           toolUsed: data.toolUsed,
+          sources: data.sources,
+          steps: data.steps,
         });
         // First reply in a chat assigns the backend conversation id; without
         // storing it the next turn starts a new server-side conversation and

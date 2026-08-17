@@ -400,6 +400,12 @@ async function drainOutbox() {
           messageId: entry.messageId,
           answer: data.answer,
           toolUsed: data.tool_used,
+          // A replayed message gets the same citations and trace a live one
+          // does — there is no reason a queued question should come back
+          // with a "From your documents" badge and nothing behind it, or
+          // with no record of which specialists were asked.
+          sources: data.sources,
+          steps: data.steps,
           conversationId: data.conversation_id,
         });
         continue;

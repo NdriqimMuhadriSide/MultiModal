@@ -13,6 +13,7 @@
 import { useCallback, useState } from "react";
 import { useChatStore } from "@/store/chat-store";
 import { ChatService } from "@/services/chat-service";
+import { newId } from "@/lib/uuid";
 import { ApiError } from "@/types/api";
 import type { Message } from "@/types";
 
@@ -43,7 +44,7 @@ function toUserFacingError(err: unknown): string {
 
 function createMessage(role: Message["role"], content: string, status?: Message["status"]): Message {
   return {
-    id: crypto.randomUUID(),
+    id: newId(),
     role,
     content,
     createdAt: new Date().toISOString(),

@@ -23,9 +23,9 @@ import { useState } from "react";
 import Link from "next/link";
 import {
   FileText,
-  Image as ImageIcon,
   MessageSquare,
   Plus,
+  ScanText,
   Search,
   Video,
   X,
@@ -178,7 +178,14 @@ export function Sidebar({ className, onNavigate }: SidebarProps) {
           <Video className="size-4 shrink-0 opacity-70" />
           <span>Live Streaming</span>
         </Link>
-        <SidebarDisabledItem icon={ImageIcon} label="Images" />
+        <Link
+          href="/read"
+          onClick={() => onNavigate?.()}
+          className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+        >
+          <ScanText className="size-4 shrink-0 opacity-70" />
+          <span>Read a document</span>
+        </Link>
       </div>
 
       <div className="mt-auto p-3 text-xs text-sidebar-foreground/50">
@@ -262,27 +269,5 @@ function SidebarSectionLabel({ children }: { children: React.ReactNode }) {
     <span className="px-2.5 py-1.5 text-xs font-medium uppercase tracking-wide text-sidebar-foreground/50">
       {children}
     </span>
-  );
-}
-
-function SidebarDisabledItem({
-  icon: Icon,
-  label,
-}: {
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-}) {
-  return (
-    <button
-      disabled
-      title="Coming soon"
-      className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-sidebar-foreground/40 cursor-not-allowed"
-    >
-      <Icon className="size-4 shrink-0" />
-      <span>{label}</span>
-      <span className="ml-auto rounded-full bg-sidebar-accent px-1.5 py-0.5 text-[10px] font-medium text-sidebar-foreground/50">
-        Soon
-      </span>
-    </button>
   );
 }

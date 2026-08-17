@@ -40,6 +40,7 @@ import { createJSONStorage, persist } from "zustand/middleware";
 import { clearActiveChatId, readActiveChatId, writeActiveChatId } from "@/lib/active-chat";
 import { clearMediaCache } from "@/lib/media-cache";
 import { clearMessages, putMessages, type StoredMessage } from "@/lib/message-db";
+import { newId } from "@/lib/uuid";
 import type { Chat, Message } from "@/types";
 
 /** localStorage key, namespaced so it can't collide with other app state. */
@@ -80,7 +81,7 @@ const INTERRUPTED_NOTICE =
 function createEmptyChat(): Chat {
   const now = new Date().toISOString();
   return {
-    id: crypto.randomUUID(),
+    id: newId(),
     conversationId: null,
     title: "New Chat",
     messages: [],

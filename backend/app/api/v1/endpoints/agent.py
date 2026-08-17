@@ -1,15 +1,21 @@
 """
 Agent endpoint.
 
-Pure HTTP layer: parses the request, invokes the agent's reasoning loop,
-maps domain errors to HTTP status codes, and returns the response model
-(including which tool the agent chose, for transparency/debugging).
+Pure HTTP layer: parses the request, invokes the supervisor, maps domain
+errors to HTTP status codes, and returns the answer together with the trace
+that produced it.
+
+This is the project's general entry point: rather than the caller choosing
+between /chat, /rag/chat, /research/ask and /vision/ask, it sends the message
+here and the supervisor decides whether it can answer directly or needs a
+specialist - and, when a question spans both, uses more than one.
 """
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 
 from app.api.v1.sse import SSE_HEADERS, sse_event
 from app.schemas.agent import AgentAskRequest, AgentAskResponse
+from app.schemas.agent_trace import to_step_models
 from app.services.agent_service import AgentChatService, get_agent_chat_service
 
 router = APIRouter(tags=["agent"])
@@ -36,6 +42,9 @@ def ask_agent(
         answer=result.answer,
         tool_used=result.tool_used,
         conversation_id=result.conversation_id,
+        sources=result.sources,
+        steps=to_step_models(result.steps),
+        stopped_because=result.stopped_because,
     )
 
 
@@ -49,16 +58,29 @@ def ask_agent_stream(
 
     Event shapes, all sent as `data: {...}`:
 
-        {"type": "start", "conversation_id": "..."}   exactly one, first
-        {"type": "tool", "tool": "answer_directly"}   once routing resolves
-        {"type": "delta", "content": "..."}           zero or more
-        {"type": "done"}                              terminates a good stream
-        {"type": "error", "detail": "..."}            terminates a bad one
+        {"type": "start", "conversation_id": "..."}    exactly one, first
+        {"type": "step", "index": 1, "depth": 0, ...}  one per completed turn
+        {"type": "tool", "tool": "research_documents"} exactly one
+        {"type": "sources", "sources": [...]}          at most one, if any
+        {"type": "answer", "content": "..."}           exactly one
+        {"type": "done", "stopped_because": "..."}     terminates a good stream
+        {"type": "error", "detail": "..."}             terminates a bad one
 
-    The `tool` event is what this has and /chat/stream doesn't: routing costs
-    an LLM round trip before any answer text exists, so it arrives as its own
-    event rather than holding up `start`. The client can label the bubble
-    with the chosen tool while the answer is still being written.
+    Steps rather than token deltas, which is a change from what this endpoint
+    used to send. The old routing agent picked one tool and forwarded that
+    tool's generation token by token; a supervisor's answer is already whole
+    inside its `finish` action by the time the loop sees it, so there is no
+    token stream to forward. See AgentChatService.stream_answer for why the
+    replacement suits the work better.
+
+    `depth` is 0 for the supervisor's own steps and 1 for a specialist's, so
+    the client can indent a delegated step rather than presenting a
+    specialist's search as something the supervisor did itself.
+
+    `tool` arrives once the run resolves rather than up front: with
+    delegation, the honest label for a turn depends on what the whole turn
+    ended up using, and a turn that read the image *and* checked a policy
+    should not be badged as either alone.
 
     Errors are events rather than status codes for the same reason as
     /chat/stream: by the time the model can fail, the response has already
@@ -82,8 +104,6 @@ def ask_agent_stream(
                 yield sse_event(event)
         except (RuntimeError, ValueError) as exc:
             yield sse_event({"type": "error", "detail": str(exc)})
-            return
-        yield sse_event({"type": "done"})
 
     return StreamingResponse(
         frames(),

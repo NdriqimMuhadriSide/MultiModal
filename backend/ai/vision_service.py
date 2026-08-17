@@ -51,14 +51,30 @@ def _strip_think_block(text: str) -> str:
 class VisionService:
     """Wraps an OpenAI-compatible client for image + text (multimodal) completions."""
 
-    def __init__(self, api_key: str, model: str, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        base_url: str | None = None,
+        max_retries: int = 2,
+        timeout: float = 60.0,
+    ) -> None:
         if not api_key:
             raise ValueError(
                 "GROQ_API_KEY is not set. Add it to your .env file before "
                 "calling the vision service."
             )
 
-        self._client = OpenAI(api_key=api_key, base_url=base_url)
+        # Same policy, and for the same reasons, as ai/llm_service.py - see
+        # the comment there. A vision request carries an image and so is
+        # slower than a text one, but not by an order of magnitude, and it
+        # runs from the same threadpool.
+        self._client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            max_retries=max_retries,
+            timeout=timeout,
+        )
         self._model = model
 
     def analyze_image(
@@ -67,6 +83,7 @@ class VisionService:
         mime_type: str,
         question: str,
         system_prompt: str = VISION_SYSTEM_PROMPT,
+        temperature: float | None = None,
     ) -> str:
         """
         Send an image and a question to the vision model and return the
@@ -80,6 +97,12 @@ class VisionService:
         duplicated analyze method. This is the only supported way to
         customize model behavior here; everything else (encoding, the
         client, error handling) stays identical for every caller.
+
+        `temperature` is unset by default. agents/vision_agent.py passes 0:
+        it reads the reply for facts about a document, and a description
+        that varies run to run makes the agent's answer unreproducible for
+        no benefit. A caller wanting prose about a photograph should leave
+        it alone.
 
         Raises:
             ValueError: if the question is empty, the image is empty, or the
@@ -114,6 +137,10 @@ class VisionService:
                         ],
                     },
                 ],
+                # Omitted entirely when None, so POST /vision/analyze and the
+                # streaming analyzer keep sending exactly the request they
+                # sent before this parameter existed.
+                **({} if temperature is None else {"temperature": temperature}),
             )
         except Exception as exc:  # noqa: BLE001 - surface as a domain error
             raise RuntimeError(f"Vision request failed: {exc}") from exc
@@ -129,4 +156,6 @@ def get_vision_service() -> VisionService:
         api_key=settings.groq_api_key,
         model=settings.groq_vision_model,
         base_url=settings.groq_base_url,
+        max_retries=settings.llm_max_retries,
+        timeout=settings.llm_timeout_seconds,
     )

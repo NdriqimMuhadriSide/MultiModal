@@ -26,6 +26,7 @@ import { useChatStore } from "@/store/chat-store";
 import { AudioService } from "@/services/audio-service";
 import { validateAudioFile } from "@/lib/validate-audio";
 import { mediaKey, putMedia } from "@/lib/media-cache";
+import { newId } from "@/lib/uuid";
 import { ApiError } from "@/types/api";
 import type { Message } from "@/types";
 
@@ -35,7 +36,7 @@ function createMessage(
   extra?: Partial<Message>
 ): Message {
   return {
-    id: crypto.randomUUID(),
+    id: newId(),
     role,
     content,
     createdAt: new Date().toISOString(),
@@ -91,7 +92,7 @@ export function useAudio() {
       // assistant bubble below — they're two views of the same upload, so
       // caching it twice would double the disk cost for nothing. Derived up
       // front and written fire-and-forget; see the note in use-vision.ts.
-      const attachmentId = crypto.randomUUID();
+      const attachmentId = newId();
       const cacheKey = mediaKey(attachmentId);
       void putMedia(attachmentId, audio);
 
@@ -128,7 +129,7 @@ export function useAudio() {
           status: "sent",
           attachments: [
             {
-              id: crypto.randomUUID(),
+              id: newId(),
               type: "audio",
               url: previewUrl,
               name: response.metadata.filename,

@@ -173,6 +173,48 @@ def ocr_pdf_pages(file_bytes: bytes, page_indexes: list[int]) -> dict[int, str]:
     return grids
 
 
+def ocr_image(image_bytes: bytes) -> str:
+    """
+    OCR a standalone image and return its character grid.
+
+    The image counterpart to `ocr_pdf_pages`, added for agents/vision_agent.py.
+    Everything after rasterization is shared - word boxes, the confidence
+    floor, the grid painting - because a photographed receipt has the same
+    reading-order problem as a scanned page and deserves the same treatment.
+
+    What it skips is the pypdfium2 step, which exists only because a PDF
+    page is not an image until something renders it. An upload already is
+    one, so it goes straight to Tesseract, and there is no `ocr_dpi` here:
+    the file has whatever resolution it has. A photo taken too far away
+    reads badly and no setting on this side can fix it.
+
+    Returns "" rather than raising when Tesseract is absent or the bytes are
+    not a decodable image, matching `ocr_pdf_pages`' contract. Callers that
+    need to explain the absence should ask `unavailable_reason()` - an empty
+    grid on its own cannot distinguish "no OCR engine" from "a photo of a
+    blank wall", and those need different things said about them.
+    """
+    if not image_bytes or not is_available():
+        return ""
+
+    import pytesseract
+    from PIL import Image
+
+    try:
+        with Image.open(BytesIO(image_bytes)) as image:
+            data = pytesseract.image_to_data(
+                image,
+                lang=settings.ocr_language,
+                output_type=pytesseract.Output.DICT,
+            )
+    except Exception:
+        # An unreadable image costs its text, not the request - the caller
+        # gets an empty grid and decides what to say about it.
+        return ""
+
+    return words_to_grid(_to_words(data))
+
+
 def _to_words(data: dict) -> list[Word]:
     """Turn Tesseract's parallel-array TSV output into Word records."""
     words: list[Word] = []

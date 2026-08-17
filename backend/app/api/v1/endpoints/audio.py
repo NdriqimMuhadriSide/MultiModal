@@ -25,6 +25,14 @@ async def analyze_audio(
         description="Optional question about the audio (e.g. 'Summarize the key decisions.'). "
         "Defaults to a general summary if omitted.",
     ),
+    conversation_id: str | None = Form(
+        default=None,
+        description=(
+            "Conversation to file this analysis under. Omit to start a new "
+            "one - the backend generates an id and returns it. It does not "
+            "change the analysis."
+        ),
+    ),
     audio_service: AudioAnalysisService = Depends(get_audio_analysis_service),
 ) -> AudioAnalyzeResponse:
     """
@@ -43,6 +51,7 @@ async def analyze_audio(
             mime_type=audio.content_type or "",
             audio_bytes=audio_bytes,
             question=question,
+            conversation_id=conversation_id,
         )
     except AudioValidationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -56,6 +65,7 @@ async def analyze_audio(
     return AudioAnalyzeResponse(
         transcript=result.transcript.text,
         analysis=result.analysis,
+        conversation_id=result.conversation_id,
         metadata=AudioMetadataResponse(
             filename=result.metadata.filename,
             duration=result.metadata.duration_seconds,

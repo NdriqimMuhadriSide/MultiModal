@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from fastapi import HTTPException, status
 
 from ai.llm_service import LLMService, get_llm_service
+from memory.compaction import ConversationCompactor, get_conversation_compactor
 from memory.conversation_memory import ConversationMemory, get_conversation_memory
 
 
@@ -33,10 +34,31 @@ class ChatService:
         llm_service: LLMService,
         memory: ConversationMemory,
         history_limit: int = 10,
+        compactor: ConversationCompactor | None = None,
     ) -> None:
         self._llm_service = llm_service
         self._memory = memory
         self._history_limit = history_limit
+        self._compactor = compactor
+
+    def _load_history(self, conversation_id: str) -> list[dict[str, str]]:
+        """
+        The window, with the summary of everything before it in front.
+
+        Without a compactor this is exactly what it always was - the last N
+        messages - so a conversation shorter than the window, or a
+        deployment with compaction switched off, behaves identically.
+        """
+        prefix = (
+            self._compactor.summary_prefix(conversation_id) if self._compactor else []
+        )
+        window = self._memory.get_history(conversation_id, limit=self._history_limit)
+        return prefix + [{"role": msg.role, "content": msg.content} for msg in window]
+
+    def _compact(self, conversation_id: str) -> None:
+        """Summarise anything that has just fallen out of the window."""
+        if self._compactor:
+            self._compactor.compact(conversation_id)
 
     def get_answer(self, message: str, conversation_id: str | None = None) -> ChatResult:
         """
@@ -54,14 +76,14 @@ class ChatService:
         """
         resolved_id = conversation_id or self._memory.new_conversation_id()
 
-        history = self._memory.get_history(resolved_id, limit=self._history_limit)
-        history_messages = [{"role": msg.role, "content": msg.content} for msg in history]
+        history_messages = self._load_history(resolved_id)
 
         self._memory.add_message(resolved_id, role="user", content=message)
 
         answer = self._llm_service.generate_response(message, history=history_messages)
 
         self._memory.add_message(resolved_id, role="assistant", content=answer)
+        self._compact(resolved_id)
 
         return ChatResult(conversation_id=resolved_id, answer=answer)
 
@@ -97,8 +119,7 @@ class ChatService:
         """
         resolved_id = conversation_id or self._memory.new_conversation_id()
 
-        history = self._memory.get_history(resolved_id, limit=self._history_limit)
-        history_messages = [{"role": msg.role, "content": msg.content} for msg in history]
+        history_messages = self._load_history(resolved_id)
 
         self._memory.add_message(resolved_id, role="user", content=message)
 
@@ -116,6 +137,10 @@ class ChatService:
                     self._memory.add_message(
                         resolved_id, role="assistant", content=answer
                     )
+                    # After the last token has been sent, so the summarising
+                    # call is not something the reader waits on - the stream
+                    # simply stays open a moment longer than it used to.
+                    self._compact(resolved_id)
 
         return resolved_id, chunks()
 
@@ -136,6 +161,7 @@ def get_chat_service() -> ChatService:
             llm_service=get_llm_service(),
             memory=get_conversation_memory(),
             history_limit=settings.conversation_history_limit,
+            compactor=get_conversation_compactor(),
         )
     except ValueError as exc:
         raise HTTPException(

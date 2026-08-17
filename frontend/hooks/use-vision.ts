@@ -22,6 +22,7 @@ import { useChatStore } from "@/store/chat-store";
 import { VisionService } from "@/services/vision-service";
 import { validateImageFile } from "@/lib/validate-image";
 import { mediaKey, putMedia } from "@/lib/media-cache";
+import { newId } from "@/lib/uuid";
 import { ApiError } from "@/types/api";
 import type { Message } from "@/types";
 
@@ -31,7 +32,7 @@ function createMessage(
   extra?: Partial<Message>
 ): Message {
   return {
-    id: crypto.randomUUID(),
+    id: newId(),
     role,
     content,
     createdAt: new Date().toISOString(),
@@ -91,7 +92,7 @@ export function useVision() {
       // The write is fire-and-forget for the same reason: if it fails, the
       // key resolves to nothing after a reload, which is exactly the expired
       // placeholder this attachment would have shown anyway.
-      const attachmentId = crypto.randomUUID();
+      const attachmentId = newId();
       void putMedia(attachmentId, image);
 
       const userMessage = createMessage("user", effectiveQuestion, {

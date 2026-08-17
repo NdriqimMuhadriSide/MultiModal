@@ -1,16 +1,32 @@
 /**
- * useAgent — orchestrates sending a message to the routing agent.
+ * useAgent — orchestrates sending a message to the supervisor agent.
  *
  * Same boundary role as useChat/useRag (UI never calls AgentService or
  * mutates the store directly), but replaces the manual "General AI vs My
- * Documents" choice: the backend decides per message whether to search the
- * ingested PDFs, call a live external API, or answer from the model alone.
+ * Documents" choice: the backend decides per message whether to answer
+ * directly, ask a specialist about the documents or the conversation's
+ * image, or call a live external API — and can use more than one in a turn.
  *
- * The chosen tool comes back in `tool_used` and is stored on the message as
- * `toolUsed`, so the bubble can show where the answer came from — without
- * that, a routed answer is indistinguishable from a plain one and a
- * misroute (e.g. a documents question answered from general knowledge) is
- * invisible.
+ * What the answer rests on comes back in `tool_used` and is stored on the
+ * message as `toolUsed`, so the bubble can show where it came from. When a
+ * document specialist was involved, its citations follow in `sources` and
+ * are stored the way useRag stores them, so the claim on the badge is one
+ * the user can actually check.
+ *
+ * WHY THIS NO LONGER BUFFERS TOKENS
+ *
+ * The stream used to carry `delta` frames, and this hook batched them on an
+ * interval so a long answer did not re-serialize localStorage once per
+ * token. There are no deltas any more: a supervisor's answer is whole inside
+ * its final action by the time the backend sees it, so it arrives in one
+ * `answer` frame and the buffering has nothing left to buffer.
+ *
+ * What arrives in its place is one `step` frame per completed turn, appended
+ * to the message as they land. That is a handful of writes for a whole run
+ * rather than hundreds, so it needs no batching of its own — and it means
+ * the bubble can show what the agent is *doing* during the several seconds a
+ * delegating run spends thinking, which an empty bubble waiting on a first
+ * token could not.
  */
 "use client";
 
@@ -18,8 +34,9 @@ import { useCallback, useState } from "react";
 import { useChatStore } from "@/store/chat-store";
 import { AgentService } from "@/services/agent-service";
 import { canQueue, enqueue, requestFlush } from "@/lib/outbox";
+import { newId } from "@/lib/uuid";
 import { ApiError } from "@/types/api";
-import type { Message } from "@/types";
+import type { AgentStepView, Message } from "@/types";
 
 /**
  * True only when the request never reached the server. ApiError carries a
@@ -32,7 +49,7 @@ function isNetworkError(err: unknown): boolean {
 
 function createMessage(role: Message["role"], content: string, status?: Message["status"]): Message {
   return {
-    id: crypto.randomUUID(),
+    id: newId(),
     role,
     content,
     createdAt: new Date().toISOString(),
@@ -61,18 +78,9 @@ function toUserFacingError(err: unknown): string {
   return "Something went wrong while contacting the assistant.";
 }
 
-/**
- * How often buffered tokens are committed to the store, in milliseconds.
- * ~12 updates/second: below the threshold where text stops looking
- * continuous, and far below the per-token rate that would thrash
- * localStorage. Kept in sync with hooks/use-chat.ts.
- */
-const FLUSH_INTERVAL_MS = 80;
-
 export function useAgent() {
   const activeChat = useChatStore((state) => state.activeChat());
   const appendMessage = useChatStore((state) => state.appendMessage);
-  const appendToMessage = useChatStore((state) => state.appendToMessage);
   const updateMessage = useChatStore((state) => state.updateMessage);
   const setConversationId = useChatStore((state) => state.setConversationId);
 
@@ -95,19 +103,12 @@ export function useAgent() {
 
       setIsSending(true);
 
-      // Tokens are buffered and flushed on an interval rather than written
-      // straight through. Every store write re-serializes all persisted
-      // chats into localStorage, so writing per token would mean hundreds of
-      // full serializations for a single answer. At this cadence the text
-      // still arrives faster than anyone reads it.
-      let buffered = "";
+      // Steps accumulate here rather than in the store, so each arriving
+      // frame is one write of the whole list instead of a read-modify-write
+      // against persisted state. A run produces a handful of them, so this
+      // needs none of the interval batching token deltas did.
+      const steps: AgentStepView[] = [];
       let receivedAny = false;
-      const flush = () => {
-        if (!buffered) return;
-        appendToMessage(chatId, pendingAssistant.id, buffered);
-        buffered = "";
-      };
-      const timer = setInterval(flush, FLUSH_INTERVAL_MS);
 
       try {
         let streamError = false;
@@ -120,16 +121,38 @@ export function useAgent() {
             if (!activeChat.conversationId) {
               setConversationId(chatId, event.conversation_id);
             }
+          } else if (event.type === "step") {
+            // The run's live progress. Only the supervisor's own steps are
+            // collected: a specialist's (depth > 0) already arrive nested
+            // under the delegation that caused them in the parent step's
+            // `children`, and appending them here as well would show the
+            // same work twice — once as something the supervisor did, and
+            // once as something it delegated.
+            if (event.depth === 0) {
+              steps.push(event.step);
+              updateMessage(chatId, pendingAssistant.id, {
+                status: "streaming",
+                steps: [...steps],
+              });
+            }
           } else if (event.type === "tool") {
-            // Arrives before any text: the bubble can say where the answer
-            // is coming from while it's still being written.
             updateMessage(chatId, pendingAssistant.id, {
               status: "streaming",
               toolUsed: event.tool,
             });
-          } else if (event.type === "delta") {
-            buffered += event.content;
+          } else if (event.type === "sources") {
+            // Before the answer. The bubble already says where it came
+            // from; this is the part that lets the user check it.
+            updateMessage(chatId, pendingAssistant.id, {
+              sources: event.sources,
+            });
+          } else if (event.type === "answer") {
+            // Whole, in one frame — see this module's header for why there
+            // is nothing to stream token by token here.
             receivedAny = true;
+            updateMessage(chatId, pendingAssistant.id, {
+              content: event.content,
+            });
           } else if (event.type === "error") {
             // A provider failure after the response had already committed as
             // 200. Whatever arrived stays on screen — only the status moves.
@@ -137,7 +160,6 @@ export function useAgent() {
           }
         }
 
-        flush();
         if (streamError) {
           updateMessage(chatId, pendingAssistant.id, { status: "error" });
           setError("The assistant's response was cut off. Please try again.");
@@ -169,27 +191,18 @@ export function useAgent() {
 
         const message = toUserFacingError(err);
         // Only replace the bubble's text when nothing ever arrived. Once the
-        // user has read half an answer, blanking it to show an error destroys
-        // what they were reading; the error line below is enough.
+        // user has an answer on screen, blanking it to show an error
+        // destroys what they were reading; the error line below is enough.
         updateMessage(chatId, pendingAssistant.id, {
           ...(receivedAny ? {} : { content: message }),
           status: "error",
         });
         setError(message);
       } finally {
-        clearInterval(timer);
-        flush();
         setIsSending(false);
       }
     },
-    [
-      activeChat,
-      isSending,
-      appendMessage,
-      appendToMessage,
-      updateMessage,
-      setConversationId,
-    ]
+    [activeChat, isSending, appendMessage, updateMessage, setConversationId]
   );
 
   return {

@@ -12,7 +12,7 @@
  */
 
 /** Role of a message participant. Mirrors backend ConversationMessageResponse.role values. */
-import type { AgentTool } from "./agent";
+import type { AgentStepView, AgentTool } from "./agent";
 import type { RAGChatSource } from "./rag";
 
 export type MessageRole = "user" | "assistant" | "system";
@@ -121,8 +121,11 @@ export interface Attachment {
  * useVision/useAudio); `sources` is populated for RAG answers (see
  * useRag) — all are omitted for plain text-only messages.
  * `toolUsed` is populated for answers that came through the agent (see
- * useAgent) and records which tool its router picked, so the UI can show
- * where an answer actually came from.
+ * useAgent) and records what the supervisor's answer rests on, so the UI can
+ * show where an answer actually came from. `steps` carries the trace behind
+ * it — which specialists were asked what, and what they did — because a
+ * supervised answer is assembled out of work the user never asked for and
+ * cannot otherwise see.
  */
 export interface Message {
   id: string;
@@ -159,6 +162,12 @@ export interface Message {
   attachments?: Attachment[];
   sources?: RAGChatSource[];
   toolUsed?: AgentTool;
+  /**
+   * The supervisor's trace for this answer, delegations nested under the
+   * step that caused them. Grows as `step` frames arrive, so it is also what
+   * the bubble renders as live progress while the run is still going.
+   */
+  steps?: AgentStepView[];
 }
 
 /**

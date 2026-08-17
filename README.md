@@ -2,6 +2,8 @@
 
 A multimodal AI assistant: chat, document Q&A, image and audio understanding, and live screen/camera streaming — behind one FastAPI backend and one offline-capable Next.js client.
 
+A supervisor agent sits in front of all of it. Rather than the caller picking between `/chat`, `/rag/chat` and `/vision/ask`, one message goes to `/agent/ask` and the supervisor decides whether it can answer directly or needs a specialist — and, when a question spans both a picture and the corpus, uses more than one.
+
 Everything runs locally and on free tiers. Embeddings are computed on-device, the vector store and both databases are local files, and the LLM is reached through Groq's free API.
 
 ---
@@ -21,20 +23,24 @@ Everything runs locally and on free tiers. Embeddings are computed on-device, th
    └─────────────────────────────┘
                  |  HTTP  /api/v1/*
                  v
-   ┌─────────────────────────────────────────────────────────┐
-   │  Backend — FastAPI                                       │
-   │                                                          │
-   │  processors/  frame sampling, stream sessions            │
+   ┌───────────────────────────────────────────────────────────┐
+   │  Backend — FastAPI                                        │
+   │                                                           │
+   │  agents/      supervisor ─┬→ research agent ─┐            │
+   │               (ReAct loop)├→ vision agent ───┤            │
+   │                           └→ external API    │            │
+   │               critic gates the answer; one shared budget  │
    │  rag/         loaders → layout → structure → splitter →   │
-   │               embeddings → ChromaDB ─┐                     │
-   │              (× N query phrasings)   │                     │
+   │               embeddings → ChromaDB ─┐                    │
+   │              (× N query phrasings)   │                    │
    │                            BM25 ─────┴→ fusion → rerank → │
-   │                                        grade → answer/refuse│
-   │               context builder                             │
-   │  agents/      LangGraph StateGraph (route → tool → retry) │
-   │  memory/      conversation history (SQLite)              │
-   │  ai/          LLM · vision · transcription services      │
-   └─────────────────────────────────────────────────────────┘
+   │                                        grade → answer     │
+   │  memory/      history · compaction · attachments (SQLite) │
+   │  processors/  frame sampling, stream sessions             │
+   │  ai/          LLM · vision · transcription services       │
+   │  a2a/         Agent Card + JSON-RPC, so other agents can  │
+   │               call the research agent over the network    │
+   └───────────────────────────────────────────────────────────┘
                  |
                  v
         Groq / OpenAI-compatible LLM API
@@ -42,7 +48,7 @@ Everything runs locally and on free tiers. Embeddings are computed on-device, th
 
 ## Stack
 
-**Backend** — Python 3.12, FastAPI, Pydantic Settings, LangGraph, ChromaDB, sentence-transformers (local embeddings), SQLite, pytest.
+**Backend** — Python 3.12, FastAPI, Pydantic Settings, ChromaDB, sentence-transformers (local embeddings), SQLite, pytest. No agent framework: the reasoning loop is ~800 hand-written lines (`agents/agent_loop.py`) — see [Agents](#agents) for why.
 
 **Frontend** — Next.js (App Router), React, TypeScript, Tailwind CSS, Zustand, a hand-written service worker.
 
@@ -150,7 +156,7 @@ Two changes, both about the *conversation* rather than the index.
 
 **Retrieval now sees the conversation.** It never did: the embedding model gets one string and BM25 matches the terms in one string, so a follow-up like "how far ahead do I have to request it?" was searched for as six words with no idea what "it" meant. `rag/contextualizer.py` rewrites it into a standalone question first — "how far ahead do I have to request annual leave?" — and retrieves for that. The user's own wording still reaches the answering prompt; only the search term changes. The call is skipped entirely when there is no history, so `/rag/ask` never pays for it.
 
-**The agent is no longer single-hop.** When the knowledge-base tool retrieves nothing, a conditional edge routes to a second node that answers from the model's own knowledge and says so (`tool_used: answer_directly_after_knowledge_base`). Before, a mis-route to `KNOWLEDGE_BASE` was terminal — the router's one guess was also its last.
+**The agent is no longer single-hop.** A mis-route used to be terminal — the router's one guess was also its last. It now loops, and searches again on the strength of what the last search returned; see [Agents](#agents).
 
 Measured on 10 conversation pairs, scoring where the follow-up's correct chunk ranks:
 
@@ -165,6 +171,119 @@ A modest, real gain — and a cautionary one. The first version of the rewrite p
 `POST /documents/search` stays pure dense on purpose — it is the raw similarity probe, and its metadata filters (author, title, date) are a property of the vector store's query, not of the text index.
 
 Retrieval is exposed on `/rag/ask`: each source reports `similarity` (cosine, `null` when only keyword search found it), `keyword_score`, and `matched_by` — so "the model cited a chunk dense search never saw" is visible rather than inferred.
+
+---
+
+## Agents
+
+`POST /agent/ask` used to be a router: one LLM call picked one of three tools, that tool ran, and the answer was whatever came back. That shape can't answer
+
+> "Does this receipt comply with our expense policy?"
+
+which needs the image read **and** the corpus searched, in that order, with the second question shaped by what the first returned. A router that picks exactly one tool never could, and no single specialist can either. So the router became a supervisor.
+
+### The loop
+
+Every agent shares one hand-written ReAct loop (`agents/agent_loop.py`):
+
+```
+build prompt (question + tools + scratchpad)
+  → ask the LLM for one Thought + one Action
+  → parse the Action out of free text
+  → run the tool → Observation
+  → append (Thought, Action, Observation) ─┐
+  ←────────────────────────────────────────┘  until a terminal tool, or the budget runs out
+```
+
+There is no hidden state. The LLM is stateless between calls, so "what have I already tried" exists only because the loop keeps the scratchpad and re-sends it whole every turn.
+
+`langgraph` was a dependency while the old router existed and was **dropped**, not replaced. What the loop actually needed turned out to be a brace-scanning parser that absorbs every way a model deviates from the format it was given, three independent stop conditions (step ceiling, consecutive-parse-failure ceiling, forced synthesis), and turning a tool's exception into an observation so a failing tool costs a step rather than the run. None of that is what a graph library provides, and a framework in between makes each of them harder to see.
+
+### Who does what
+
+| Agent | Tools | For |
+| --- | --- | --- |
+| **Supervisor** (`supervisor_agent.py`) | `research_documents`, `read_image`, `call_external_api`, `finish` | Deciding. Answers directly when it can; delegates when it can't; calls more than one specialist when a question spans both |
+| **Research** (`research_agent.py`) | `list_documents`, `search_knowledge_base`, `finish` | Multi-hop corpus questions where the second search depends on the first's result — "how does our refund policy differ from the returns policy?" |
+| **Vision** (`vision_agent.py`) | `inspect_image`, `read_text`, `search_knowledge_base`, `finish` | Reading an image by deciding *how* to read it |
+
+A sub-agent is just a `Tool` whose `run` happens to be another loop — `Tool.run: Callable[[dict], str]` was already the whole interface delegation needed, and the loop did not change to support it.
+
+### Why the vision agent decides rather than pipelines
+
+OCR and a vision-language model are good at opposite things. Tesseract is exact on printed characters, free, local, and completely blind to meaning — nothing on diagrams, charts or handwriting. A vision model understands layout, charts and what a document *is*, and misreads long digit strings, which is exactly what an invoice total is.
+
+So "what is the total on this receipt?" needs both: the vision model to find where the total is, character recognition to read the digits correctly. Which combination an image needs depends on what's in it, and the only way to know is to look — an agent's decision, not a config flag.
+
+Measured over 7 labelled cases (`evals/`), each also run through a single `POST /vision/analyze` call as the baseline:
+
+| | Passed | p50 latency | Median steps |
+| --- | --- | --- | --- |
+| single vision call (baseline) | 5 / 7 | 26.4 s | — |
+| vision agent | **6 / 7** | 30.6 s | 3 |
+
+Read that as a signal, not a benchmark, and read the margin sceptically. The set is small and the images are drawn rather than photographed (`tests/image_builder.py`), so recognition does better here than it would on real input. More to the point, one of the two baseline failures was a provider rate-limit rather than a wrong answer — on a case the agent also failed — so the honest reading is that the gap rests on one case.
+
+That one case is the interesting one: a blank page, which the agent declined and the baseline described anyway. The agent's own failure is instructive in the other direction — a low-resolution total read as `84.80` instead of `84.50`, attributed in the answer to `read_text`, so the trace says exactly where the error entered.
+
+Accuracy alone can't tell an agent that *decided* how to read an image from one that runs every tool on everything, so the cases assert on tools too: which the run must have called, and which it must **not** have.
+
+### The three things a tree gets silently wrong
+
+All three are corruption rather than crashes, which is why each has a named mechanism:
+
+**Budget.** A 6-step supervisor free to call a 6-step specialist every step has a worst case of 36 LLM calls. `StepBudget` is one pool shared by reference across the whole tree, and every loop stops at whichever bites first — the pool or its own ceiling. `SUPERVISOR_TREE_BUDGET` (default 14) is what actually bounds a delegating run.
+
+**Citation labels.** Two specialists each numbering from their own ledger both hand out `[E1]` for different passages; merged, the citation list points at the wrong text with nothing raised anywhere. One `EvidenceLedger`, owned by the supervisor, passed to every specialist.
+
+**The trace.** A delegation that returned only its answer would collapse four steps into one string — and the trace is the only way a reader can check an answer assembled out of sight. Sub-steps arrive as `children` on the step that caused them, nested arbitrarily deep, and stream live rather than after.
+
+### The critic
+
+`SUPERVISOR_CRITIC_ENABLED=true` (default) reviews the draft against what the specialists actually reported, before the user sees it. It is a **gate on `finish`**, not a fourth tool: a reviewer the supervisor could choose to call would be skipped on exactly the answers that most need one — the confident ones.
+
+It needed no new control flow. `ActionRejected` already meant "the tool declined, here is what to do instead", and the loop already turns that into an observation costing one step, so an objection is fed back as the next observation and the answer is rewritten once.
+
+Two deliberate properties. It **fails open** — an unparseable verdict, an empty reply or a provider error all approve, because refusing to deliver finished, probably-correct work because a *second* model couldn't produce JSON turns a degradation into an outage. And it **doesn't run at all** when nothing was gathered: "is this supported by the evidence?" is meaningless for a question answered from the model's own knowledge, so a directly-answered question costs exactly what it did before the critic existed.
+
+### Checking the numbers against the pixels
+
+The vision agent's central promise — "never quote a number you have only seen through `inspect_image`" — was a prompt, and a model that ignores a prompt produces an answer indistinguishable from one that followed it. Meanwhile the OCR grid is sitting in memory, which is exactly what the claim can be checked against.
+
+`agents/value_check.py` reports rather than enforces, and the worked example says why:
+
+> "£84.50 across 2 covers is £42.25 a head, inside the £50 cap [E1]."
+
+`84.50` is on the receipt. `42.25` is arithmetic the agent did correctly, and `50` came from a retrieved policy passage. An enforcing validator would flag two correct values and reject the right answer. So it returns a signal — `unverified_values` — answering "which numbers here did character recognition not confirm?" and leaving the judgement to the reader, who has the trace.
+
+Matching is forgiving on form and strict on digits: both sides reduce to digit sequences, so `£1,234.50` matches an OCR grid reading `1234.50`. Comparison is per-token rather than against one concatenation of the page — otherwise a policy limit of `£50` quoted from a document matches the `50` inside the receipt's own `84.50`, and the check blesses a figure that never came from the image.
+
+### Observability
+
+One structured log line per run (`agents/run_log.py`), each carrying the id of the run that caused it. A response body can't answer "which layer spent the steps — the supervisor, or one specialist it called four times?", because that's a question about many runs rather than about this one. Parentage is tracked through a `contextvars.ContextVar` rather than a threaded parameter: sub-agents are built at dependency-injection time and invoked deep inside a tool's `run`, so there is no call signature in between that could carry a parent id.
+
+---
+
+## Agent2Agent (A2A)
+
+`A2A_ENABLED=true` exposes the research agent to *other* agents over the [A2A protocol](https://a2a-protocol.org):
+
+| Route | Purpose |
+| --- | --- |
+| `GET /.well-known/agent-card.json` | Discovery — what this agent can do, written for a model rather than a developer |
+| `POST /a2a/v1` | JSON-RPC: `message/send`, `tasks/get` |
+
+The card is served at the site root, deliberately not under `/api/v1` — the path is part of the protocol, the same way `/.well-known/openid-configuration` is. A client that has to be told where the card lives has not discovered anything.
+
+The mapping is small: message text is the question, `contextId` is a `conversation_id`, and the run comes back as three artifacts — `answer`, `evidence`, `trace`.
+
+Evidence is a separate artifact with **explicit `[E#]` labels next to the `chunkId` each stands for**, and that is the part worth reading twice. In-process, one `EvidenceLedger` shared by reference makes `[E3]` mean one passage everywhere. Over HTTP there is no shared object: this process numbers from E1, the caller numbers from E1, and merging two peers' answers silently points citations at the wrong text. Nothing here can fix that alone — only the caller knows what else it is merging — but emitting the correspondence explicitly, rather than leaving it implicit in list order, is what makes the fix possible.
+
+`tasks/get` is backed by an in-process, bounded task store. That is a development-only answer and `a2a/task_store.py` says so: with more than one worker, a task created on A isn't found on B, and a restart tells a retrying caller its work never happened. The interface is the seam — a Redis implementation is the same three methods.
+
+> **Nothing here checks credentials.** Any caller who can reach the port can spend this deployment's LLM budget and read answers drawn from its corpus. Turn it off, or put authentication in front of it, anywhere the port is reachable.
+
+---
 
 ## Getting started
 
@@ -202,7 +321,11 @@ cp .env.example .env.local    # NEXT_PUBLIC_API_URL=http://localhost:8000
 npm run dev
 ```
 
-http://localhost:3000
+http://localhost:3000 — chat at `/`, and the document reader at `/read`.
+
+`/read` is its own route rather than a mode inside the chat: the interaction is one image and one question rather than a conversation, and the output is a trace plus an answer plus caveats — a shape a chat bubble would have to be contorted to hold. The chat's own image path stays on `/vision/analyze`, which is still the right call for "describe this photo": one round trip instead of five.
+
+The trace stays on screen after the run finishes. A run takes several seconds per step and produces no prose until the last one, so without it the user watches a spinner — and an answer assembled over four tool calls they never asked for isn't something they can sanity-check any other way.
 
 ### Tests
 
@@ -210,6 +333,16 @@ http://localhost:3000
 cd backend && .venv/bin/pytest       # backend
 cd frontend && npx tsc --noEmit && npx eslint .   # frontend
 ```
+
+The vision-agent evaluation is **not** part of pytest — it needs a live API key, spends provider quota on every run, and its results are measurements rather than assertions, so a number that moved is information rather than a build failure. Run it deliberately:
+
+```bash
+cd backend && .venv/bin/python -m evals.runner            # every case, with baseline
+.venv/bin/python -m evals.runner --case clean-total       # one case
+.venv/bin/python -m evals.runner --no-baseline            # skip the /vision/analyze comparison
+```
+
+Reports land in `backend/evals/reports/`. The graders themselves are unit-tested (`tests/test_eval_grading.py`), so the scoring can be trusted without spending anything to check it.
 
 ---
 
@@ -223,18 +356,35 @@ All routes are under `/api/v1`.
 | `POST` | `/chat` | Chat with conversation memory |
 | `POST` | `/chat/stream` | Same, streamed token by token over SSE |
 | `GET` | `/chat/{conversation_id}/history` | Full stored history for a conversation |
-| `POST` | `/agent/ask` | LangGraph agent — routes to a tool, then answers |
-| `POST` | `/agent/ask/stream` | Same, streamed over SSE (this is what the UI uses) |
+| `POST` | `/agent/ask` | Supervisor — answers directly or delegates, with the trace that produced it |
+| `POST` | `/agent/ask/stream` | Same, steps streamed over SSE (this is what the UI uses) |
 | `POST` | `/documents/upload` | Upload a document (PDF, DOCX, HTML, Markdown, CSV, TXT) |
 | `POST` | `/documents/ingest` | Chunk, embed, and index a document |
 | `GET` | `/documents` | List ingested documents |
 | `POST` | `/documents/search` | Raw similarity search over chunks, filterable by author/title/date (dense only) |
 | `POST` | `/rag/ask` | Retrieval-augmented answer, with per-source retrieval scores |
 | `POST` | `/rag/chat` | RAG with conversation memory |
-| `POST` | `/vision/analyze` | Describe or answer questions about an image |
+| `POST` | `/research/ask` | Multi-hop research over the corpus — trace, evidence, and why it stopped |
+| `POST` | `/vision/analyze` | Describe or answer questions about an image (one round trip) |
+| `POST` | `/vision/ask` | Vision & OCR agent — decides how to read the image, may consult the corpus |
+| `POST` | `/vision/ask/stream` | Same, steps streamed over SSE (this is what `/read` uses) |
 | `POST` | `/audio/analyze` | Transcribe and reason over audio |
 | `POST` | `/stream/frame` | Submit one sampled frame from a live stream |
 | `POST` | `/stream/{session_id}/end` | Tear down a stream session |
+
+Two routes sit outside `/api/v1`, at the site root, because the A2A protocol fixes their location: `GET /.well-known/agent-card.json` and `POST /a2a/v1`. Both disappear entirely when `A2A_ENABLED=false`.
+
+`/agent/ask/stream` sends steps rather than token deltas. The old router forwarded one tool's generation token by token; a supervisor's answer is already whole inside its `finish` action by the time the loop sees it, so what's worth streaming is the reasoning that produced it:
+
+```
+{"type": "start",   "conversation_id": "..."}     exactly one, first
+{"type": "step",    "index": 1, "depth": 0, ...}  one per completed turn
+{"type": "tool",    "tool": "research_documents"} exactly one
+{"type": "sources", "sources": [...]}             at most one, if any
+{"type": "answer",  "content": "..."}             exactly one
+{"type": "done",    "stopped_because": "..."}     terminates a good stream
+{"type": "error",   "detail": "..."}              terminates a bad one
+```
 
 ---
 
@@ -247,6 +397,31 @@ Two independent layers, deliberately not synchronized:
 **Session context (backend)** — an in-process ring buffer of recent stream observations per session, bounded and TTL-expired. Volatile by design.
 
 There is no long-term memory: nothing is keyed by user, and nothing is summarized or promoted across conversations.
+
+### Compaction
+
+What used to happen to a turn that fell out of the window was *nothing*. Message 11 was still on disk, still rendered in the transcript the UI shows, and permanently invisible to the model — which produces a specific and confusing failure: the user can read, on screen, the message the assistant just contradicted.
+
+`CONVERSATION_COMPACTION_ENABLED=true` (default) summarises the turns that drop out and sends the summary with every subsequent prompt:
+
+```
+[summary of everything up to message N]   ← one system message
+message N+1 … message N+k                 ← the window, verbatim
+```
+
+Two markers make the split exact: the summary's `covered_through_id` high-water mark, and the oldest message still being sent verbatim. Anything strictly between them is uncompacted history, and that's what a pass consumes — so no message is in both halves or in neither. A pass rewrites the whole summary rather than appending to it, because a chain of summaries compounds its own distortions.
+
+It runs after the assistant's turn is stored, once `CONVERSATION_COMPACTION_TRIGGER` messages have built up in the gap — so roughly one exchange in every trigger/2 pays an extra LLM call. That's a compromise, honestly: compacting *before* building the prompt would delay the answer the user is waiting on, and a background worker needs a queue this project doesn't have. `compact` never raises — a provider timeout during summarisation must not fail a turn that already succeeded.
+
+### Attachments
+
+Conversation memory stores what was *said* about an image or a recording; `memory/attachment_store.py` stores the bytes, so a turn's `attachment_ref` still resolves after the response is sent. Without it, vision had a silent failure: a stored turn was text only, so a second upload in the same conversation left the previous answer sitting in history as though it were about the new one — "it's red" read back as context for a photograph of something blue.
+
+Refs are content-addressed (SHA-256 + extension), which buys three things for free: re-uploading the same image writes nothing, the ref is verifiable, and there's no id allocator to lock or sequence. The cost is equally plain — nothing is ever deleted, because two conversations about the same image share a file and a delete would need reference counting.
+
+Audio gets the same treatment plus the transcript, capped at `AUDIO_TRANSCRIPT_MEMORY_CHARS` (default 4000). Minutes of speech become text once, at real cost; throwing that away with the response meant paying it again for every later question about the same recording. The cap is the compromise — a full hour-long transcript would swamp every subsequent prompt, and the recording is kept, so the untruncated text is one re-transcription away.
+
+Both vision and audio **write** to memory without reading from it: a `conversation_id` files the analysis, it doesn't change it.
 
 ## Client-side storage
 
@@ -271,18 +446,21 @@ A service worker (`frontend/public/sw.js`, production only) serves hashed assets
 ```
 backend/
   app/          FastAPI app, config, routes, services
-  agents/       LangGraph assistant agent
+  agents/       reasoning loop, supervisor, research + vision specialists,
+                critic, value check, run log
+  a2a/          Agent Card, JSON-RPC dispatch, task store
   ai/           LLM, vision, transcription services
   rag/          loaders → blocks → chunks → embeddings → Chroma → retrieval
     loaders/    one module per format (pdf, docx, html, markdown, csv)
-  memory/       conversation memory (SQLite)
+  memory/       conversation memory, compaction, attachment store (SQLite)
   processors/   streaming frame sampling and session state
-  prompts/      system and routing prompts
+  prompts/      one module per agent/role
+  evals/        labelled vision-agent cases, graders, runner, reports
   tests/        pytest suite
 frontend/
-  app/          App Router routes
-  components/   UI
-  hooks/        feature hooks (chat, vision, audio, streaming, …)
+  app/          App Router routes (/ chat, /read document reader)
+  components/   UI, including the agent trace
+  hooks/        feature hooks (chat, vision, vision agent, audio, streaming, …)
   lib/          API client, storage tiers, validators
   services/     one module per backend feature
   store/        Zustand stores
@@ -309,9 +487,20 @@ Every setting is an environment variable with a sane default — see `backend/.e
 | `MULTI_QUERY_ENABLED` | `false` | LLM-generated question phrasings, all retrieved and fused — costs one LLM call per question |
 | `CORRECTIVE_RAG_ENABLED` | `false` | Grade retrieval and refuse when nothing relevant was found — needs `RERANK_ENABLED` |
 | `QUERY_CONTEXTUALIZATION_ENABLED` | `true` | Rewrite follow-ups into standalone questions before retrieving |
-| `AGENT_KB_FALLBACK_ENABLED` | `true` | Agent answers from general knowledge (disclosed) when the documents have nothing |
+| `EMBEDDING_CACHE_ENABLED` | `true` | Remember what a text embedded to — nothing to invalidate, since vectors are deterministic |
+| `SUPERVISOR_MAX_STEPS` | `6` | Steps the supervisor itself may take |
+| `SUPERVISOR_TREE_BUDGET` | `14` | Steps for the **whole tree**, from one shared pool — this is what bounds a delegating run |
+| `SUPERVISOR_CRITIC_ENABLED` | `true` | Review the draft against the evidence before it reaches the user |
+| `RESEARCH_MAX_STEPS` / `VISION_AGENT_MAX_STEPS` | `6` / `5` | Per-specialist ceilings, under the tree budget |
+| `AGENT_TEMPERATURE` | `0.0` | Sampling for replies that get *parsed* — noise there reads as a prompt bug |
+| `CONVERSATION_COMPACTION_ENABLED` | `true` | Summarise turns that fall out of the history window |
+| `CONVERSATION_COMPACTION_TRIGGER` | `10` | Messages that must accumulate outside the window before a pass runs |
+| `AUDIO_TRANSCRIPT_MEMORY_CHARS` | `4000` | Transcript kept alongside the turn; the recording itself is kept in full |
+| `A2A_ENABLED` | `true` | Expose the research agent over A2A — **unauthenticated**, see above |
+| `A2A_PUBLIC_BASE_URL` | `http://localhost:8000` | What a *third party* can resolve, not what this process binds to |
+| `LLM_TIMEOUT_SECONDS` / `LLM_MAX_RETRIES` | `60` / `2` | Deliberately below the SDK's 600s default: these run in FastAPI's threadpool |
 | `MAX_UPLOAD_SIZE_MB` | `25` | PDF upload ceiling |
 | `STREAM_SAMPLING_INTERVAL_SECONDS` | `2.0` | One frame every N seconds |
 | `CORS_ORIGINS` | `localhost:3000, localhost:8080` | Comma-separated |
 
-Local data (`backend/data/`) — SQLite databases, the Chroma index, and uploads — is gitignored and regenerated on first run.
+Local data (`backend/data/`) — SQLite databases, the Chroma index, the embedding cache, stored attachments, and uploads — is gitignored and regenerated on first run.

@@ -36,11 +36,53 @@ class Settings(BaseSettings):
     groq_vision_model: str = Field(default="qwen/qwen3.6-27b", alias="GROQ_VISION_MODEL")
     groq_base_url: str = Field(default="https://api.groq.com/openai/v1", alias="GROQ_BASE_URL")
 
+    # --- Provider request policy (ai/llm_service.py and its two siblings) ---
+    # Both of these have SDK defaults; they are set explicitly because the
+    # defaults are not the ones this app wants.
+    #
+    # `max_retries` defaults to 2 in the openai SDK, which retries 408, 409,
+    # 429 and 5xx with exponential backoff. That is already the right
+    # behaviour - it is named here so it is visible and tunable rather than
+    # inherited by accident.
+    llm_max_retries: int = Field(
+        default=2,
+        ge=0,
+        le=10,
+        alias="LLM_MAX_RETRIES",
+        description="Provider-level retries for transient failures (429, 5xx, dropped connections).",
+    )
+    # The timeout is the one that genuinely needed changing. The SDK's
+    # default read timeout is 600 seconds, and every request here is made
+    # from a synchronous route running in FastAPI's threadpool - so one hung
+    # connection holds a worker for ten minutes, and with retries on top,
+    # up to half an hour. The pool is small; a handful of those is an
+    # outage. A minute is far longer than a chat completion legitimately
+    # takes, and failing at that point is better than holding the worker.
+    llm_timeout_seconds: float = Field(
+        default=60.0, gt=0, alias="LLM_TIMEOUT_SECONDS"
+    )
+    # Transcription gets its own, because it is the one call whose duration
+    # scales with the upload: a 25MB recording is minutes of audio, and
+    # Whisper is not going to answer inside the chat timeout.
+    transcription_timeout_seconds: float = Field(
+        default=300.0, gt=0, alias="TRANSCRIPTION_TIMEOUT_SECONDS"
+    )
+
     # --- Vector DB / RAG (used by future tasks) ---
     chroma_persist_dir: str = Field(default="./data/chroma", alias="CHROMA_PERSIST_DIR")
     chroma_collection_name: str = Field(default="documents", alias="CHROMA_COLLECTION_NAME")
 
     # --- Embeddings (local, free - runs on-device via sentence-transformers) ---
+    # Embeddings are deterministic - the same text and model always give the
+    # same vector - so this cache has no staleness question to answer, and a
+    # model change is simply a different key rather than something to
+    # invalidate.
+    embedding_cache_enabled: bool = Field(
+        default=True, alias="EMBEDDING_CACHE_ENABLED"
+    )
+    embedding_cache_db_path: str = Field(
+        default="./data/embedding_cache.sqlite3", alias="EMBEDDING_CACHE_DB_PATH"
+    )
     embedding_model_name: str = Field(
         default="all-MiniLM-L6-v2", alias="EMBEDDING_MODEL_NAME"
     )
@@ -269,12 +311,91 @@ class Settings(BaseSettings):
         default=True, alias="QUERY_CONTEXTUALIZATION_ENABLED"
     )
 
-    # When the knowledge-base tool retrieves nothing, let the agent take a
-    # second hop and answer from the model's own knowledge, disclosing that
-    # it did. Off means a mis-route to the knowledge base stays terminal:
-    # the router's one guess is also its last.
-    agent_kb_fallback_enabled: bool = Field(
-        default=True, alias="AGENT_KB_FALLBACK_ENABLED"
+    # --- Agent sampling (agents/agent_loop.py) ---
+    # Temperature for every LLM call an agent loop makes, including the
+    # vision tool's.
+    #
+    # 0 rather than the provider default, because these replies are *parsed*,
+    # not read: a Thought/Action pair has to match a grammar, and sampling
+    # noise in it shows up as a parse failure that looks exactly like a
+    # prompt problem. It also makes a run reproducible, which is a
+    # precondition for the evaluation set the quality criteria need.
+    #
+    # Deliberately scoped to the agents. /chat, the RAG answer step and the
+    # chunking helpers still send no temperature at all and keep the
+    # provider default they were built against.
+    agent_temperature: float = Field(
+        default=0.0, ge=0.0, le=2.0, alias="AGENT_TEMPERATURE"
+    )
+
+    # --- Research agent (agents/research_agent.py) ---
+    # The multi-hop loop's ceiling on tool calls per question. This is a cost
+    # and latency bound, not a quality one: every step is a full LLM call
+    # whose prompt contains every prior step, so the run's cost grows
+    # quadratically with this number, not linearly.
+    #
+    # 6 fits the questions this agent exists for - list the documents, search
+    # two or three phrasings, answer - with a step of slack for a recovery.
+    # Raising it does not make the agent smarter; it makes a confused agent
+    # more expensive before it gives up.
+    research_max_steps: int = Field(default=6, ge=2, le=20, alias="RESEARCH_MAX_STEPS")
+    # Passages per search. Lower than the RAG endpoint's DEFAULT_TOP_K of 5
+    # on purpose: the research agent runs several searches and every passage
+    # it sees is re-sent in the prompt on every later step, so breadth here
+    # is paid for repeatedly. Breadth comes from more searches instead.
+    research_search_top_k: int = Field(
+        default=4, ge=1, le=10, alias="RESEARCH_SEARCH_TOP_K"
+    )
+
+    # --- Vision agent (agents/vision_agent.py) ---
+    # Lower than the research agent's ceiling because the work is shallower:
+    # a typical run is inspect -> read text -> maybe one policy search ->
+    # answer. The steps are also individually more expensive - a vision call
+    # sends the whole image, and OCR costs about a second of local compute -
+    # so an over-generous budget here costs more than it does there.
+    vision_agent_max_steps: int = Field(
+        default=5, ge=2, le=12, alias="VISION_AGENT_MAX_STEPS"
+    )
+    vision_agent_search_top_k: int = Field(
+        default=4, ge=1, le=10, alias="VISION_AGENT_SEARCH_TOP_K"
+    )
+
+    # --- Supervisor agent (agents/supervisor_agent.py) ---
+    # How many steps the supervisor itself may take. Small on purpose: its
+    # job is to decide, delegate, and write up, not to do the work. A typical
+    # run is one delegation and a finish; the ceiling exists for the question
+    # that genuinely needs two specialists plus a step of slack.
+    supervisor_max_steps: int = Field(
+        default=6, ge=2, le=12, alias="SUPERVISOR_MAX_STEPS"
+    )
+    # Steps for the WHOLE tree - supervisor and every specialist it calls -
+    # drawn from one shared pool. This, not the per-agent ceilings, is what
+    # bounds a delegating run.
+    #
+    # Without it the ceilings multiply rather than add: a 6-step supervisor
+    # free to call a 6-step specialist on each of its steps has a worst case
+    # of 36 LLM calls, and the worst case is what sets a timeout and a bill.
+    # 14 covers the deepest run this system has a use for - read the image
+    # (3), search the policy (3), supervise and write up (3) - with slack,
+    # while capping the runaway at less than half of what it would otherwise
+    # be.
+    supervisor_tree_budget: int = Field(
+        default=14, ge=4, le=40, alias="SUPERVISOR_TREE_BUDGET"
+    )
+    # Review the supervisor's draft against what its specialists reported
+    # before it reaches the user, sending it back once if a claim is not
+    # supported (agents/critic.py).
+    #
+    # On by default, and cheaper than it looks: a review only happens when a
+    # specialist was actually consulted, so a directly-answered question
+    # costs nothing extra. A delegating turn pays one call, or two on the
+    # runs where the draft is sent back.
+    #
+    # Off is a supported configuration, not a broken one - the supervisor
+    # answers exactly as it did before this existed, and `reviewed` on the
+    # result reports false rather than lying about a check that never ran.
+    supervisor_critic_enabled: bool = Field(
+        default=True, alias="SUPERVISOR_CRITIC_ENABLED"
     )
 
     # --- Conversation memory (local SQLite - no extra infra required) ---
@@ -282,10 +403,40 @@ class Settings(BaseSettings):
         default="./data/conversations.sqlite3", alias="CONVERSATION_DB_PATH"
     )
     conversation_history_limit: int = Field(
-        default=10,
+        default=20,
         alias="CONVERSATION_HISTORY_LIMIT",
         description="Max number of past messages (short-term memory window) sent to the LLM per request.",
     )
+    # --- Compaction (what happens to turns that fall out of that window) ---
+    conversation_compaction_enabled: bool = Field(
+        default=True, alias="CONVERSATION_COMPACTION_ENABLED"
+    )
+    conversation_compaction_trigger: int = Field(
+        default=10,
+        ge=1,
+        alias="CONVERSATION_COMPACTION_TRIGGER",
+        description=(
+            "How many messages must fall out of the window before they are "
+            "summarised. Each pass costs one LLM call, so this trades memory "
+            "resolution against how often a turn pays for it."
+        ),
+    )
+    conversation_summary_max_words: int = Field(
+        default=200,
+        ge=50,
+        le=1000,
+        alias="CONVERSATION_SUMMARY_MAX_WORDS",
+        description=(
+            "Length ceiling for the summary. It is sent with every "
+            "subsequent request in the conversation, so this is a per-turn "
+            "cost, not a one-off."
+        ),
+    )
+    # Where uploaded images and audio are kept so a turn's attachment_ref
+    # still resolves after the response has been sent. Separate from
+    # upload_dir, which is scratch space for the ingestion pipeline: these
+    # files are conversation state and are read back on later requests.
+    attachment_dir: str = Field(default="./data/attachments", alias="ATTACHMENT_DIR")
 
     # --- File uploads ---
     max_upload_size_mb: int = Field(default=25, alias="MAX_UPLOAD_SIZE_MB")
@@ -301,6 +452,17 @@ class Settings(BaseSettings):
     # ahead of the API call, so an oversized file fails fast with a clear
     # message instead of a confusing error from the transcription provider.
     max_audio_size_mb: int = Field(default=25, alias="MAX_AUDIO_SIZE_MB")
+    audio_transcript_memory_chars: int = Field(
+        default=4000,
+        ge=0,
+        alias="AUDIO_TRANSCRIPT_MEMORY_CHARS",
+        description=(
+            "How much of a transcript is kept in the conversation record. "
+            "It rides along in every later prompt for that conversation, so "
+            "this is a recurring cost - and the audio itself is kept, so the "
+            "full text is always one re-transcription away."
+        ),
+    )
 
     # --- Real-time streaming (Phase 7) ---
     # A single sampled frame is a JPEG/PNG screenshot-sized image, nowhere
@@ -328,6 +490,59 @@ class Settings(BaseSettings):
     # bounds memory growth from abandoned sessions (e.g. a browser tab
     # closed without calling a stop endpoint).
     stream_session_ttl_seconds: int = Field(default=300, alias="STREAM_SESSION_TTL_SECONDS")
+
+    # --- A2A (Agent2Agent protocol - see a2a/) ---
+    # Whether this deployment exposes its research agent to other agents over
+    # A2A at all. Off means the routes are never registered, so there is no
+    # unauthenticated JSON-RPC endpoint to find - see app/main.py.
+    #
+    # Default on because phase 1 is localhost-only development. It should be
+    # off, or fronted by authentication, anywhere the port is reachable:
+    # until the card declares a securityScheme AND app/api/a2a.py enforces
+    # it, any caller who can reach this endpoint can spend the deployment's
+    # LLM budget and read answers drawn from its corpus.
+    a2a_enabled: bool = Field(default=True, alias="A2A_ENABLED")
+
+    # The A2A revision a2a/types.py was written against. Sent in the card so
+    # a client can refuse a peer it cannot speak to.
+    a2a_protocol_version: str = Field(default="0.3.0", alias="A2A_PROTOCOL_VERSION")
+
+    # How this agent identifies itself. `version` is the agent's own, not the
+    # protocol's: a caller uses it to notice that the peer's behaviour
+    # changed under it, so it should move when the prompts or tools do.
+    a2a_agent_name: str = Field(
+        default="Document Research Agent", alias="A2A_AGENT_NAME"
+    )
+    a2a_agent_version: str = Field(default="1.0.0", alias="A2A_AGENT_VERSION")
+
+    # The base URL other agents use to reach this one. Deployment-dependent
+    # and the field most likely to be wrong: it must be what a *third party*
+    # can resolve, not what this process binds to. Behind a reverse proxy or
+    # in a container these differ, and a card advertising the internal
+    # address sends every future caller somewhere that does not exist.
+    a2a_public_base_url: str = Field(
+        default="http://localhost:8000", alias="A2A_PUBLIC_BASE_URL"
+    )
+    # The JSON-RPC path, appended to the base URL to form the card's `url`.
+    # Not fixed by the spec (unlike /.well-known/agent-card.json), and read
+    # by both the route and the card so the two cannot disagree.
+    a2a_rpc_path: str = Field(default="/a2a/v1", alias="A2A_RPC_PATH")
+
+    # Optional attribution in the card. Omitted from the card entirely when
+    # the organization is blank, rather than sent empty.
+    a2a_provider_organization: str = Field(
+        default="", alias="A2A_PROVIDER_ORGANIZATION"
+    )
+    a2a_provider_url: str = Field(default="", alias="A2A_PROVIDER_URL")
+
+    # How many finished tasks stay readable by `tasks/get`. A ceiling rather
+    # than a TTL because the in-memory store has no clock to expire against,
+    # and because a task's value drops to near zero once its caller has read
+    # it - which happens immediately or not at all. See a2a/task_store.py on
+    # why this whole store is a development-only answer.
+    a2a_max_stored_tasks: int = Field(
+        default=256, ge=1, le=10000, alias="A2A_MAX_STORED_TASKS"
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

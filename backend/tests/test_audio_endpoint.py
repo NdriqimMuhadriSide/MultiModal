@@ -32,7 +32,7 @@ class StubAudioAnalysisService(AudioAnalysisService):
     def __init__(self) -> None:  # no super().__init__ - no real collaborators needed
         pass
 
-    def analyze(self, filename, mime_type, audio_bytes, question):
+    def analyze(self, filename, mime_type, audio_bytes, question, conversation_id=None):
         return AudioAnalysisResult(
             transcript=Transcript(
                 text="We decided to ship the feature on Friday.",
@@ -47,6 +47,7 @@ class StubAudioAnalysisService(AudioAnalysisService):
                 channels=1,
                 size_bytes=len(audio_bytes),
             ),
+            conversation_id=conversation_id or "generated-id",
         )
 
 
@@ -54,7 +55,7 @@ class FailingValidationAudioService(AudioAnalysisService):
     def __init__(self) -> None:
         pass
 
-    def analyze(self, filename, mime_type, audio_bytes, question):
+    def analyze(self, filename, mime_type, audio_bytes, question, conversation_id=None):
         raise AudioValidationError(f"Unsupported audio file '{filename}'.")
 
 
@@ -126,7 +127,7 @@ def test_audio_analyze_maps_runtime_error_to_bad_gateway():
         def __init__(self) -> None:
             pass
 
-        def analyze(self, filename, mime_type, audio_bytes, question):
+        def analyze(self, filename, mime_type, audio_bytes, question, conversation_id=None):
             raise RuntimeError("Transcription request failed: connection refused")
 
     app.dependency_overrides[get_audio_analysis_service] = lambda: FailingTranscriptionService()

@@ -4,7 +4,11 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from app.main import app
-from app.services.vision_service import VisionAnalysisService, get_vision_analysis_service
+from app.services.vision_service import (
+    VisionAnalysisResult,
+    VisionAnalysisService,
+    get_vision_analysis_service,
+)
 
 client = TestClient(app)
 
@@ -15,8 +19,17 @@ class StubVisionAnalysisService(VisionAnalysisService):
     def __init__(self) -> None:  # no super().__init__ - no real vision client needed
         pass
 
-    def analyze(self, image_bytes: bytes, mime_type: str, question: str) -> str:
-        return f"stub analysis ({mime_type}, {len(image_bytes)} bytes) for: {question}"
+    def analyze(
+        self,
+        image_bytes: bytes,
+        mime_type: str,
+        question: str,
+        conversation_id: str | None = None,
+    ) -> VisionAnalysisResult:
+        return VisionAnalysisResult(
+            answer=f"stub analysis ({mime_type}, {len(image_bytes)} bytes) for: {question}",
+            conversation_id=conversation_id or "generated-id",
+        )
 
 
 def _tiny_png_bytes() -> bytes:

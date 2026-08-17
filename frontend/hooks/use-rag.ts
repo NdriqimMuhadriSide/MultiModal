@@ -21,6 +21,7 @@
 import { useCallback, useRef, useState } from "react";
 import { useChatStore } from "@/store/chat-store";
 import { RagService } from "@/services/rag-service";
+import { newId } from "@/lib/uuid";
 import { ApiError } from "@/types/api";
 import type { Message } from "@/types";
 
@@ -32,7 +33,7 @@ const SEARCHING_STAGE_DURATION_MS = 900;
 
 function createMessage(role: Message["role"], content: string, status?: Message["status"]): Message {
   return {
-    id: crypto.randomUUID(),
+    id: newId(),
     role,
     content,
     createdAt: new Date().toISOString(),

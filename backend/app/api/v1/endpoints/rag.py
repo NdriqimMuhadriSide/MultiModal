@@ -13,10 +13,9 @@ from app.schemas.rag import (
     RAGAskResponse,
     RAGChatRequest,
     RAGChatResponse,
-    RAGChatSource,
     RAGSourceResponse,
 )
-from app.services.rag_service import get_rag_service
+from app.services.rag_service import get_rag_service, to_chat_sources
 from rag.rag_service import RAGService
 
 router = APIRouter(tags=["rag"])
@@ -90,13 +89,5 @@ def chat_rag(
 
     return RAGChatResponse(
         answer=result.answer,
-        sources=[
-            RAGChatSource(
-                filename=source.filename,
-                page=source.page,
-                chunk_id=source.chunk_id,
-                section=source.section,
-            )
-            for source in result.sources
-        ],
+        sources=to_chat_sources(result.sources),
     )

@@ -19,6 +19,15 @@ router = APIRouter(tags=["vision"])
 async def analyze_image(
     image: UploadFile = File(..., description="Image file to analyze."),
     question: str = Form(..., description="Question about the image."),
+    conversation_id: str | None = Form(
+        default=None,
+        description=(
+            "Conversation to file this analysis under. Omit to start a new "
+            "one - the backend generates an id and returns it. It does not "
+            "change the answer; this endpoint asks one question about one "
+            "image."
+        ),
+    ),
     vision_service: VisionAnalysisService = Depends(get_vision_analysis_service),
 ) -> VisionAnalyzeResponse:
     image_bytes = await image.read()
@@ -31,10 +40,11 @@ async def analyze_image(
         )
 
     try:
-        answer = vision_service.analyze(
+        result = vision_service.analyze(
             image_bytes=image_bytes,
             mime_type=image.content_type or "",
             question=question,
+            conversation_id=conversation_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -43,4 +53,6 @@ async def analyze_image(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
         ) from exc
 
-    return VisionAnalyzeResponse(answer=answer)
+    return VisionAnalyzeResponse(
+        answer=result.answer, conversation_id=result.conversation_id
+    )

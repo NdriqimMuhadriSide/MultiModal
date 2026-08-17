@@ -81,14 +81,36 @@ def _segment_field(segment: object, field: str, default: object) -> object:
 class TranscriptionService:
     """Wraps an OpenAI-compatible client for audio (speech-to-text) transcription."""
 
-    def __init__(self, api_key: str, model: str, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        base_url: str | None = None,
+        max_retries: int = 2,
+        timeout: float = 300.0,
+    ) -> None:
         if not api_key:
             raise ValueError(
                 "GROQ_API_KEY is not set. Add it to your .env file before "
                 "calling the transcription service."
             )
 
-        self._client = OpenAI(api_key=api_key, base_url=base_url)
+        # Same retry policy as ai/llm_service.py, but a much longer default
+        # timeout: this is the one call whose duration scales with the
+        # upload rather than with the length of an answer. A 25MB recording
+        # is minutes of audio, and cutting it off at the chat timeout would
+        # fail every long file by design.
+        #
+        # Worth knowing what a retry costs here: a transcription that times
+        # out and retries re-uploads the whole file and re-runs Whisper on
+        # it. That is why the timeout is generous rather than the retry
+        # count being high.
+        self._client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            max_retries=max_retries,
+            timeout=timeout,
+        )
         self._model = model
 
     def transcribe(self, audio_bytes: bytes, filename: str) -> TranscriptionResult:
@@ -137,4 +159,6 @@ def get_transcription_service() -> TranscriptionService:
         api_key=settings.groq_api_key,
         model=settings.groq_whisper_model,
         base_url=settings.groq_base_url,
+        max_retries=settings.llm_max_retries,
+        timeout=settings.transcription_timeout_seconds,
     )

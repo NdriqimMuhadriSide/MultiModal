@@ -24,6 +24,7 @@ from functools import lru_cache
 from sentence_transformers import SentenceTransformer
 
 from app.core.config import settings
+from rag.embedding_cache import EmbeddingCache, get_embedding_cache
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +40,16 @@ class EmbeddedChunk:
 class EmbeddingService:
     """Wraps a local sentence-transformers model for text -> vector embedding."""
 
-    def __init__(self, model_name: str) -> None:
+    def __init__(self, model_name: str, cache: EmbeddingCache | None = None) -> None:
         # Loading the model reads weights from disk (downloading them once,
         # on first use, to a local cache) - this happens once per process
         # thanks to the lru_cache on get_embedding_service(), not per request.
         self._model = SentenceTransformer(model_name)
         self._model_name = model_name
+        # Optional, and absent means "always run the model" - which is what
+        # this class did before the cache existed, and what every test that
+        # constructs it directly still gets.
+        self._cache = cache
 
     @property
     def dimension(self) -> int:
@@ -88,19 +93,40 @@ class EmbeddingService:
         """
         Embed a single string.
 
+        Served from the cache when this exact string has been embedded by
+        this exact model before - which is the common case for a query
+        someone has asked twice, and for re-ingesting a document whose
+        chunks haven't changed.
+
         Raises:
             ValueError: if `text` is empty.
         """
         if not text or not text.strip():
             raise ValueError("text must not be empty.")
 
-        vector = self._model.encode(text, normalize_embeddings=True)
-        return vector.tolist()
+        if self._cache is not None:
+            cached = self._cache.get_many(self._model_name, [text])
+            if text in cached:
+                return cached[text]
+
+        vector = self._model.encode(text, normalize_embeddings=True).tolist()
+
+        if self._cache is not None:
+            self._cache.put_many(self._model_name, {text: vector})
+
+        return vector
 
     def embed_texts(self, texts: list[str]) -> list[EmbeddedChunk]:
         """
         Embed a batch of strings at once (more efficient than calling
         embed_text in a loop - the model batches the forward pass).
+
+        Cache hits are removed from the batch and only the misses reach the
+        model, so a re-ingest where three chunks in a hundred changed runs
+        the forward pass three times. Duplicates within `texts` collapse to
+        one forward pass for the same reason - the batch sent to the model
+        is deduplicated - while the returned list still has one entry per
+        input, in the order given.
 
         Raises:
             ValueError: if `texts` is empty or contains a blank string.
@@ -111,11 +137,26 @@ class EmbeddingService:
             raise ValueError("texts must not contain empty strings.")
 
         self._warn_about_truncation(texts)
-        vectors = self._model.encode(texts, normalize_embeddings=True)
-        return [
-            EmbeddedChunk(text=text, embedding=vector.tolist())
-            for text, vector in zip(texts, vectors)
-        ]
+
+        known = (
+            self._cache.get_many(self._model_name, texts)
+            if self._cache is not None
+            else {}
+        )
+
+        # dict.fromkeys rather than set: the order the model sees stays
+        # deterministic, which keeps a batch reproducible run to run.
+        missing = list(dict.fromkeys(text for text in texts if text not in known))
+        if missing:
+            vectors = self._model.encode(missing, normalize_embeddings=True)
+            fresh = {
+                text: vector.tolist() for text, vector in zip(missing, vectors)
+            }
+            if self._cache is not None:
+                self._cache.put_many(self._model_name, fresh)
+            known.update(fresh)
+
+        return [EmbeddedChunk(text=text, embedding=known[text]) for text in texts]
 
     def _warn_about_truncation(self, texts: list[str]) -> None:
         """
@@ -146,4 +187,6 @@ class EmbeddingService:
 @lru_cache
 def get_embedding_service() -> EmbeddingService:
     """Return a cached EmbeddingService (the model is loaded once per process)."""
-    return EmbeddingService(model_name=settings.embedding_model_name)
+    return EmbeddingService(
+        model_name=settings.embedding_model_name, cache=get_embedding_cache()
+    )

@@ -40,6 +40,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { StreamingService } from "@/services/streaming-service";
+import { newId } from "@/lib/uuid";
 import { ApiError } from "@/types/api";
 import { STREAM_FRAME_MIME_TYPE, STREAM_FRAME_QUALITY } from "@/types";
 
@@ -173,7 +174,7 @@ export function useStreaming(
       // this a soft no-op (no frames captured) rather than a crash.
     });
 
-    const newSessionId = crypto.randomUUID();
+    const newSessionId = newId();
     setSessionId(newSessionId);
     setIsStreaming(true);
 

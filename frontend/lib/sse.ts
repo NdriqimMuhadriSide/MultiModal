@@ -18,6 +18,12 @@ import { ApiError } from "@/types/api";
 /**
  * POSTs `body` and yields each parsed event as it arrives.
  *
+ * `body` is sent as JSON, unless it is a `FormData` — which the vision
+ * agent's stream needs, since it carries an image file. In that case the
+ * Content-Type header is deliberately *omitted*: the browser has to set it
+ * itself so it can append the multipart boundary, and setting it by hand
+ * produces a request the server cannot parse.
+ *
  * Two distinct failure modes, and callers need to tell them apart:
  *   - The request never started (offline, or a non-2xx before any bytes).
  *     Throws `ApiError`, matching every other service, so the existing
@@ -31,12 +37,16 @@ export async function* streamSse<TEvent>(
   body: unknown,
   signal?: AbortSignal
 ): AsyncGenerator<TEvent> {
+  const isForm = typeof FormData !== "undefined" && body instanceof FormData;
+
   let response: Response;
   try {
     response = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-      body: JSON.stringify(body),
+      headers: isForm
+        ? { Accept: "text/event-stream" }
+        : { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: isForm ? (body as FormData) : JSON.stringify(body),
       signal,
     });
   } catch {
