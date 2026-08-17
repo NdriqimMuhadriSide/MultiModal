@@ -1,6 +1,6 @@
 /**
  * Header — top bar showing the app name, a link to /read, and live backend
- * connection status.
+ * connection status as a single coloured dot.
  *
  * Presentation-only: it renders whatever `useHealthCheck` reports and holds
  * no fetch/timer logic itself, keeping the "no business logic in
@@ -20,6 +20,17 @@ import { useHealthCheck } from "@/hooks/use-health-check";
 import { ThemeToggle } from "./ThemeToggle";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+
+/**
+ * The wording that used to sit next to the dot. Kept as real text rather than
+ * dropped, because it is still what the tooltip and the screen reader use -
+ * only its position on screen changed.
+ */
+const STATUS_LABEL = {
+  checking: "Checking backend…",
+  online: "Backend connected",
+  offline: "Backend offline",
+} as const;
 
 interface HeaderProps {
   onToggleSidebar?: () => void;
@@ -58,25 +69,29 @@ export function Header({ onToggleSidebar }: HeaderProps) {
       </div>
 
       <div className="flex items-center gap-2 text-xs font-medium">
+        {/* The dot alone, with the wording moved to a tooltip and to
+            screen-reader-only text.
+            The label cannot simply be deleted along with the visible string.
+            A bare coloured circle is meaningless to anyone using a screen
+            reader, and to anyone who cannot distinguish the red from the
+            green - which is the single most common form of colour blindness,
+            and this is a control whose entire content IS a colour. So the dot
+            stops being `aria-hidden` and carries the status itself:
+            `role="status"` announces changes as they happen, `title` gives
+            sighted users the wording on hover, and the sr-only span is what
+            actually gets read out. */}
         <span
+          role="status"
+          aria-label={STATUS_LABEL[status]}
+          title={STATUS_LABEL[status]}
           className={cn(
             "size-2 rounded-full",
             status === "online" && "bg-emerald-500",
             status === "offline" && "bg-red-500",
             status === "checking" && "animate-pulse bg-muted-foreground"
           )}
-          aria-hidden
-        />
-        <span
-          className={cn(
-            "text-muted-foreground",
-            status === "online" && "text-emerald-600",
-            status === "offline" && "text-red-600"
-          )}
         >
-          {status === "checking" && "Checking backend..."}
-          {status === "online" && "Backend Connected"}
-          {status === "offline" && "Backend Offline"}
+          <span className="sr-only">{STATUS_LABEL[status]}</span>
         </span>
         <ThemeToggle />
       </div>
