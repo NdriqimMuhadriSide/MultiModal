@@ -2,7 +2,13 @@ __pycache__/
 *.pyc
 .venv/
 venv/
-.env
+# `.env*` rather than `.env`, because the exact-match rule only covered the
+# one filename. A `.env.bak`, `.env.local` or `.env.production` - the files
+# people actually create while debugging a deployment - were left untracked
+# but NOT ignored, which is the dangerous combination: invisible in the diff,
+# one `git add -A` away from publishing a live API key.
+.env*
+!.env.example
 data/uploads/*
 !data/uploads/.gitkeep
 data/chroma/*
