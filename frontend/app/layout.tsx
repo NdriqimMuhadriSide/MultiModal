@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { cookies } from "next/headers";
 import { Geist, Geist_Mono } from "next/font/google";
+import { Analytics } from "@vercel/analytics/next";
+import { SpeedInsights } from "@vercel/speed-insights/next";
 import { ServiceWorkerRegistrar } from "@/components/ServiceWorkerRegistrar";
 import { APPEARANCE_COOKIE } from "@/lib/theme";
 import "./globals.css";
@@ -106,6 +108,8 @@ export default async function RootLayout({
         {!isKnown && <script dangerouslySetInnerHTML={{ __html: themeScript }} />}
         <ServiceWorkerRegistrar />
         {children}
+        <Analytics />
+        <SpeedInsights />
       </body>
     </html>
   );
